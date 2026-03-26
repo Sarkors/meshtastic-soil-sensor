@@ -11,11 +11,11 @@
 #define MAX_INTERVAL INT32_MAX // FIXME: INT32_MAX to avoid overflow issues with Apple clients but should be UINT32_MAX
 
 #define min_default_telemetry_interval_secs 60
-#define default_gps_update_interval IF_ROUTER(ONE_DAY, 2 * 60)
+#define default_gps_update_interval IF_ROUTER(ONE_DAY, 60)
 #define default_telemetry_broadcast_interval_secs IF_ROUTER(ONE_DAY / 2, 60 * 60)
 #define default_broadcast_interval_secs IF_ROUTER(ONE_DAY / 2, 60 * 60)
 #define default_broadcast_smart_minimum_interval_secs 5 * 60
-#define min_default_broadcast_interval_secs 60 * 60
+#define min_default_broadcast_interval_secs 60 
 #define min_default_broadcast_smart_minimum_interval_secs 5 * 60
 #define default_wait_bluetooth_secs IF_ROUTER(1, 60)
 #define default_sds_secs IF_ROUTER(ONE_DAY, UINT32_MAX) // Default to forever super deep sleep
@@ -24,7 +24,7 @@
 #define default_screen_on_secs IF_ROUTER(1, 60 * 10)
 #define default_node_info_broadcast_secs 3 * 60 * 60
 #define default_neighbor_info_broadcast_secs 6 * 60 * 60
-#define min_node_info_broadcast_secs 60 * 60 // No regular broadcasts of more than once an hour
+#define min_node_info_broadcast_secs 60 // No regular broadcasts of more than once an hour
 #define min_neighbor_info_broadcast_secs 4 * 60 * 60
 #define default_map_publish_interval_secs 60 * 60
 #ifdef USERPREFS_RINGTONE_NAG_SECS
