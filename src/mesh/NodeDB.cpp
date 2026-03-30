@@ -65,7 +65,7 @@ EXT_RAM_BSS_ATTR meshtastic_DeviceState devicestate;
 meshtastic_MyNodeInfo &myNodeInfo = devicestate.my_node;
 meshtastic_NodeDatabase nodeDatabase;
 meshtastic_LocalConfig config;
-meshtastic_DeviceUIConfig uiconfig{.screen_brightness = 153, .screen_timeout = 30};
+meshtastic_DeviceUIConfig uiconfig = {153, 30};
 meshtastic_LocalModuleConfig moduleConfig;
 meshtastic_ChannelFile channelFile;
 
@@ -143,8 +143,9 @@ uint32_t get_st7789_id(uint8_t cs, uint8_t sck, uint8_t mosi, uint8_t dc, uint8_
     digitalWrite(rst, HIGH);
     delay(10);
 
-    readwrite8(0x04, 24, 1, cs, sck, mosi, dc, rst);
-    uint32_t ID = readwrite8(0x04, 24, 1, cs, sck, mosi, dc, rst); // ST7789 needs twice
+    uint32_t ID = 0;
+    ID = readwrite8(0x04, 24, 1, cs, sck, mosi, dc, rst);
+    ID = readwrite8(0x04, 24, 1, cs, sck, mosi, dc, rst); // ST7789 needs twice
     return ID;
 }
 
@@ -321,9 +322,9 @@ NodeDB::NodeDB()
     // Uncomment below to always enable UDP broadcasts
     // config.network.enabled_protocols = meshtastic_Config_NetworkConfig_ProtocolFlags_UDP_BROADCAST;
 
-    // If we are setup to broadcast on any default channel slot (with default frequency slot semantics),
-    // ensure that the telemetry intervals are coerced to the minimum value of 30 minutes or more.
-    if (channels.hasDefaultChannel()) {
+    // If we are setup to broadcast on the default channel, ensure that the telemetry intervals are coerced to the minimum value
+    // of 30 minutes or more
+    if (channels.isDefaultChannel(channels.getPrimaryIndex())) {
         LOG_DEBUG("Coerce telemetry to min of 30 minutes on defaults");
         moduleConfig.telemetry.device_update_interval = Default::getConfiguredOrMinimumValue(
             moduleConfig.telemetry.device_update_interval, min_default_telemetry_interval_secs);
@@ -515,6 +516,7 @@ bool NodeDB::factoryReset(bool eraseBleBonds)
     installDefaultConfig(!eraseBleBonds); // Also preserve the private key if we're not erasing BLE bonds
     installDefaultModuleConfig();
     installDefaultChannels();
+    installRoleDefaults(config.device.role); // Apply role-specific defaults after all configs are set
     // third, write everything to disk
     saveToDisk();
     if (eraseBleBonds) {
@@ -562,10 +564,6 @@ void NodeDB::installDefaultConfig(bool preserveKey = false)
     config.has_bluetooth = (HAS_BLUETOOTH ? true : false);
     config.has_security = true;
     config.device.rebroadcast_mode = meshtastic_Config_DeviceConfig_RebroadcastMode_ALL;
-	config.position.gps_mode = meshtastic_Config_PositionConfig_GpsMode_ENABLED;
-        
-        config.position.fixed_position = true;
-	config.position.position_broadcast_secs = 60;
 
     config.lora.sx126x_rx_boosted_gain = true;
     config.lora.tx_enabled =
@@ -575,10 +573,6 @@ void NodeDB::installDefaultConfig(bool preserveKey = false)
 
 #if HAS_TFT // For the devices that support MUI, default to that
     config.display.displaymode = meshtastic_Config_DisplayConfig_DisplayMode_COLOR;
-#endif
-
-#if defined(TFT_WIDTH) && defined(TFT_HEIGHT) && (TFT_WIDTH >= 200 || TFT_HEIGHT >= 200)
-    config.display.enable_message_bubbles = true;
 #endif
 
 #ifdef USERPREFS_CONFIG_DEVICE_ROLE
@@ -591,7 +585,7 @@ void NodeDB::installDefaultConfig(bool preserveKey = false)
         config.device.role = USERPREFS_CONFIG_DEVICE_ROLE;
     }
 #else
-    config.device.role = meshtastic_Config_DeviceConfig_Role_CLIENT; // Default to client.
+    config.device.role = meshtastic_Config_DeviceConfig_Role_SENSOR; // Default to sensor for field nodes.
 #endif
 
 #ifdef USERPREFS_CONFIG_LORA_REGION
@@ -788,7 +782,7 @@ void NodeDB::initConfigIntervals()
 #ifdef USERPREFS_CONFIG_POSITION_BROADCAST_INTERVAL
     config.position.position_broadcast_secs = USERPREFS_CONFIG_POSITION_BROADCAST_INTERVAL;
 #else
-    config.position.position_broadcast_secs = default_broadcast_interval_secs;
+    config.position.position_broadcast_secs = 900; // 15 minutes for static sensor nodes
 #endif
 
     config.power.ls_secs = default_ls_secs;
@@ -815,31 +809,28 @@ void NodeDB::installDefaultModuleConfig()
     moduleConfig.has_range_test = true;
     moduleConfig.has_serial = true;
     moduleConfig.has_store_forward = true;
-    moduleConfig.telemetry.environment_measurement_enabled = true;
     moduleConfig.has_telemetry = true;
     moduleConfig.has_external_notification = true;
-#if defined(PIN_BUZZER) || defined(PIN_VIBRATION) || defined(LED_NOTIFICATION)
-    moduleConfig.external_notification.enabled = true;
-#endif
 #if defined(PIN_BUZZER)
+    moduleConfig.external_notification.enabled = true;
     moduleConfig.external_notification.output_buzzer = PIN_BUZZER;
     moduleConfig.external_notification.use_pwm = true;
     moduleConfig.external_notification.alert_message_buzzer = true;
+    moduleConfig.external_notification.nag_timeout = default_ringtone_nag_secs;
 #endif
 #if defined(PIN_VIBRATION)
+    moduleConfig.external_notification.enabled = true;
     moduleConfig.external_notification.output_vibra = PIN_VIBRATION;
     moduleConfig.external_notification.alert_message_vibra = true;
     moduleConfig.external_notification.output_ms = 500;
+    moduleConfig.external_notification.nag_timeout = 2;
 #endif
 #if defined(LED_NOTIFICATION)
+    moduleConfig.external_notification.enabled = true;
     moduleConfig.external_notification.output = LED_NOTIFICATION;
     moduleConfig.external_notification.active = LED_STATE_ON;
     moduleConfig.external_notification.alert_message = true;
     moduleConfig.external_notification.output_ms = 1000;
-#endif
-#if defined(PIN_VIBRATION)
-    moduleConfig.external_notification.nag_timeout = 2;
-#elif defined(PIN_BUZZER) || defined(LED_NOTIFICATION)
     moduleConfig.external_notification.nag_timeout = default_ringtone_nag_secs;
 #endif
 
@@ -941,7 +932,8 @@ void NodeDB::installRoleDefaults(meshtastic_Config_DeviceConfig_Role role)
         owner.is_unmessagable = true;
         moduleConfig.telemetry.device_update_interval = default_telemetry_broadcast_interval_secs;
         moduleConfig.telemetry.environment_measurement_enabled = true;
-        moduleConfig.telemetry.environment_update_interval = 300;
+        moduleConfig.telemetry.environment_update_interval = 10800; // 3 hours for field sensor nodes
+	config.position.gps_mode = meshtastic_Config_PositionConfig_GpsMode_NOT_PRESENT; // No hardware GPS on sensor nodes
     } else if (role == meshtastic_Config_DeviceConfig_Role_LOST_AND_FOUND) {
         config.position.position_broadcast_smart_enabled = false;
         config.position.position_broadcast_secs = 300; // Every 5 minutes
@@ -1005,6 +997,8 @@ void NodeDB::installDefaultChannels()
     LOG_INFO("Install default ChannelFile");
     memset(&channelFile, 0, sizeof(meshtastic_ChannelFile));
     channelFile.version = DEVICESTATE_CUR_VER;
+    // Full position precision for field sensor nodes
+    channelFile.channels[0].settings.module_settings.position_precision = 32;
 }
 
 void NodeDB::resetNodes(bool keepFavorites)
@@ -1421,7 +1415,7 @@ void NodeDB::loadFromDisk()
         moduleConfig.statusmessage.node_status[sizeof(moduleConfig.statusmessage.node_status) - 1] = '\0';
     }
     if (portduino_config.enable_UDP) {
-        config.network.enabled_protocols = meshtastic_Config_NetworkConfig_ProtocolFlags_UDP_BROADCAST;
+        config.network.enabled_protocols = true;
     }
 
 #endif
@@ -1778,7 +1772,7 @@ void NodeDB::addFromContact(meshtastic_SharedContact contact)
         info->has_device_metrics = false;
         info->has_position = false;
         info->user.public_key.size = 0;
-        memset(info->user.public_key.bytes, 0, sizeof(info->user.public_key.bytes));
+        info->user.public_key.bytes[0] = 0;
     } else {
         /* Clients are sending add_contact before every text message DM (because clients may hold a larger node database with
          * public keys than the radio holds). However, we don't want to update last_heard just because we sent someone a DM!
