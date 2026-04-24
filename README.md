@@ -1,175 +1,187 @@
-# Meshtastic Soil Moisture Sensor Firmware
+# NavaMesh — Gatekeeper Node
 
-Custom Meshtastic firmware for direct analog soil moisture sensing on LoRa mesh nodes. Built for agricultural field deployments — no intermediate microcontroller required. Sensor readings are transmitted as structured telemetry over the mesh and relayed as human-readable text messages to a dedicated channel.
+## Why This Exists
 
-All firmware patches are already applied in this repo. Clone, build, flash, and configure.
+For our NavaMesh project we need to keep hardware as cost-effective and low-powered as possible given the resource constraints in the Navajo region. Soil sensor nodes send telemetry over Meshtastic to an MQTT ingestor, which feeds InfluxDB and our Azure cloud setup.
 
----
-
-## What This Does
-
-- Reads an analog soil moisture sensor (HD-38) directly on the radio node
-- Transmits soil moisture percentage as Meshtastic environment telemetry
-- Automatically relays readings as a text message to a configurable channel (default: `navamesh`)
-- Works standalone with no phone or laptop required after initial configuration
+The Gatekeeper node is the field access bridge — it lets a farmer or operator remotely trigger a Wi-Fi HaLow connection from anywhere on the mesh, without keeping a high-draw radio on 24/7.
 
 ---
 
-## Supported Hardware
+## How It Works
 
-| Hardware | Status |
-|----------|--------|
-| RAK19007 + RAK4631 (nRF52840) | ✅ Confirmed working |
-| Heltec WiFi LoRa 32 v3 (ESP32-S3) | ✅ Confirmed working |
+A WisBlock RAK4631 runs continuously on ~5–10mA, listening on Meshtastic Channel 2. The Heltec HaLow Dongle stays completely unpowered until a trigger command arrives.
 
-### Required Components
-- RAK19007 WisBlock Base Board + RAK4631 Core Module, **or** Heltec WiFi LoRa 32 v3
-- HD-38 soil moisture sensor (VCC, GND, D0, A0)
-- 3.3V power supply or solar + battery management system
+```
+Remote node sends "Power On" on Channel 2
+        ↓
+WisBlock GatekeeperModule receives message
+        ↓
+IO1 pulled HIGH → Solar Manager EN pin HIGH → 5V rail enabled
+        ↓
+Heltec boots via USB-C pigtail, begins HaLow bridge
+        ↓
+"Power Off" received  OR  5-minute watchdog fires
+        ↓
+IO1 pulled LOW → 5V rail cut → Heltec off
+```
+
+<img width="906" height="571" alt="gatekeeperdiagram" src="https://github.com/user-attachments/assets/1145fc75-613f-4423-aa74-637ff27ae624" />
+
+The 1.9W solar panel (~380mA in full sun) easily covers the WisBlock idle draw. Heltec on-time is kept brief to protect the energy balance during cloudy periods.
+
+---
+
+## Hardware
+
+| Component | Part | Role |
+|---|---|---|
+| Controller | WisBlock RAK4631 (nRF52840 + SX1262) | Always-on listener, EN pin controller |
+| Bridge | Heltec WiFi HaLow Dongle V2 | HaLow bridge, ~800mA peak |
+| Power Manager | DFRobot Solar Power Manager 5V V1.1 | Solar MPPT, LiPo management, switched 5V rail |
+| Enclosure | RAKBox-UO150x100x45-Solar | Weatherproof with integrated 1.9W panel |
 
 ---
 
 ## Wiring
 
-### RAK4631 (RAK19007 Base Board)
-| HD-38 Pin | RAK19007 Pin |
-|-----------|-------------|
-| VCC | 3V3 |
-| GND | GND |
-| A0 | AIN1 (P0.31) |
-| D0 | Not connected |
+### Solar Manager Blue Header (3-pin)
 
-### Heltec v3
-| HD-38 Pin | Heltec Pin |
-|-----------|-----------|
-| VCC | 3.3V |
-| GND | GND |
-| A0 | GPIO 7 |
-| D0 | Not connected |
+| Pin position | Label | Connect to |
+|---|---|---|
+| Top | GND | WisBlock GND |
+| Middle | EN | WisBlock IO1 |
+| Bottom | 5V | Heltec USB-C pigtail — red (VBUS) |
 
-> **Note:** Solder the A0 connection directly. Friction-fit header pins are unreliable for ADC readings.
+> **Remove the blue jumper** from the EN header before wiring IO1. With the jumper installed the 5V rail is always-on regardless of IO1 state.
+
+> **Shared ground is mandatory.** Without the GND wire between the Solar Manager and WisBlock, IO1 has no reference and EN control does not work.
+
+### Heltec USB-C Pigtail
+
+Use only **red (VBUS)** and **black (GND)**. Tape off remaining wires.
+
+| Wire | Connect to |
+|---|---|
+| Red (VBUS) | Solar Manager blue header — 5V (bottom) |
+| Black (GND) | Solar Manager blue header — GND (top) |
+
+### Full Wiring Summary
+
+```
+Solar Panel   ──→  Solar Manager  SOLAR IN  (screw terminal)
+LiPo Battery  ──→  Solar Manager  BAT IN    (screw terminal)
+
+Solar Manager  USB-A out   ──→  WisBlock  USB power in    (always-on)
+Solar Manager  EN  (mid)   ──→  WisBlock  IO1             (control signal)
+Solar Manager  GND (top)   ──→  WisBlock  GND             (shared ground)
+Solar Manager  5V  (bot)   ──→  Heltec    USB-C red wire  (switched power)
+Solar Manager  GND (top)   ──→  Heltec    USB-C black wire
+```
 
 ---
 
-## Setup
+## Firmware
 
-### 1. Clone This Repo
+### GatekeeperModule
 
-```bash
-git clone https://github.com/Sarkors/meshtastic-soil-sensor.git
-cd meshtastic-soil-sensor
-git submodule update --init --recursive
+Located in `src/modules/GatekeeperModule.h` and `GatekeeperModule.cpp`, registered in `src/modules/Modules.cpp`.
+
+**Tunable constants at the top of `GatekeeperModule.h`:**
+
+```cpp
+#define GATEKEEPER_CHANNEL   2                        // Meshtastic channel index (0-based)
+#define HELTEC_MAX_ON_MS     (5UL * 60UL * 1000UL)   // Auto-shutoff — 5 minutes default
+#define CMD_POWER_ON         "Power On"
+#define CMD_POWER_OFF        "Power Off"
 ```
 
-### 2. Install PlatformIO
+Adjust `HELTEC_MAX_ON_MS` based on mission length and available solar.
 
-Install [VS Code](https://code.visualstudio.com/) and the PlatformIO extension, or install the CLI:
+**Boot behaviour:** IO1 is forced LOW in the constructor before anything else runs — the Heltec is always off at startup, even after an unexpected WisBlock reset mid-session.
 
-```bash
-pip install platformio
-```
+**Watchdog:** If "Power Off" is never received, the module automatically cuts power after `HELTEC_MAX_ON_MS` to prevent a net-negative energy day.
 
-### 3. Calibrate
+### Build and Flash
 
-Before building, update the calibration values in `src/modules/Telemetry/Sensor/AnalogSoilSensor.h` to match your sensor and soil conditions. See [CONFIGURATION.md](CONFIGURATION.md) for instructions.
-
-### 4. Build
-
-**RAK4631:**
-```bash
+```powershell
+# Always specify the rak4631 environment
+# Running plain "pio run" also builds tbeam, which lacks RAK BSP pin definitions
 pio run -e rak4631
+pio run -e rak4631 -t upload
 ```
 
-**Heltec v3:**
-```bash
-pio run -e heltec-v3
+### Set LoRa Region After First Flash
+
+```powershell
+python -m meshtastic --port COM5 --set lora.region US
 ```
 
-### 5. Flash
+### Confirm the Module Loaded
 
-**RAK4631:**
-```bash
-pio run -e rak4631 --target upload --upload-port COMX
+Open the serial monitor before or immediately after reset:
+
+```powershell
+pio device monitor -p COM5 -b 115200
 ```
 
-**Heltec v3:**
-```bash
-pio run -e heltec-v3 --target upload --upload-port COMX
-```
-
-Replace `COMX` with your device's COM port. On Linux/Mac use `/dev/ttyUSBx` or `/dev/tty.usbserialx`.
-
----
-
-## Post-Flash Configuration
-
-Run these commands after flashing. Close the serial monitor first — it blocks the COM port.
-
-```bash
-# Set device role to SENSOR (required for standalone operation without a phone)
-python -m meshtastic --port COMX --set device.role SENSOR
-
-# Set telemetry interval in seconds — 10800 = 3 hours
-python -m meshtastic --port COMX --set telemetry.environment_update_interval 10800
-
-# Enable environment measurement
-python -m meshtastic --port COMX --set telemetry.environment_measurement_enabled true
-
-# Verify settings stuck
-python -m meshtastic --port COMX --get telemetry
-```
-
-### Add the Navamesh Channel
-
-In the Meshtastic app on your phone:
-1. Settings → Channels → Add Channel
-2. Set Name: `navamesh`
-3. Set PSK: *(obtain from your team lead — do not share publicly)*
-4. Save
-
-This must be done on every node that needs to send or receive soil readings.
-
----
-
-## Verifying It Works
-
-Open the serial monitor:
-```bash
-pio device monitor --port COMX --baud 115200
-```
-
-You should see:
-```
-[EnvironmentTelemetry] AnalogSoilSensor: raw ADC=XXXX, moisture=XX%
-[EnvironmentTelemetry] TelemetryRelay: sending 'Soil: XX%' to channel 1
-```
-
-On any phone connected to the mesh with the navamesh channel configured, you should see `Soil: XX%` messages arriving at your set interval.
-
----
-
-## Project Architecture
+Press the reset button on the WisBlock. Look for this in the first few seconds of boot:
 
 ```
-Soil Sensor (HD-38)
-      │ analog voltage
-      ▼
-RAK4631 / Heltec v3
-  ├─ ADC reading → moisture %
-  ├─ Environment telemetry packet → LoRa mesh (primary channel)
-  └─ Text message 'Soil: XX%' → LoRa mesh (navamesh channel)
-      │
-      ▼
-Router Node (WisBlock)
-  └─ Rebroadcasts packets across mesh
-      │
-      ▼
-Any phone on navamesh channel
-  └─ Receives 'Soil: XX%' messages
+GatekeeperModule: initialized, EN pin LOW (Heltec off)
+```
+
+If you don't see it, check that `Modules.cpp` contains both the `#include` and the `new GatekeeperModule()` instantiation:
+
+```powershell
+Select-String "GatekeeperModule" src/modules/Modules.cpp
 ```
 
 ---
 
-## License
+## Sending Commands
 
-Based on [Meshtastic firmware](https://github.com/meshtastic/firmware) (GPL-3.0). Custom additions in this repo are released under GPL-3.0.
+From any Meshtastic node on the same mesh, send a plain text message **on Channel 2**:
+
+| Message | Effect |
+|---|---|
+| `Power On` | Enables 5V rail — Heltec boots |
+| `Power Off` | Cuts 5V rail immediately |
+
+Commands on any other channel are silently ignored. A repeat `Power On` while the Heltec is already running resets the auto-shutoff timer.
+
+---
+
+## Troubleshooting
+
+**Heltec always on — doesn't respond to commands**
+- Confirm the blue jumper is fully removed from the EN header
+- Confirm IO1 DuPont is on the EN pin (middle), not the BAT pin (bottom)
+- Confirm GND wire is connected between Solar Manager and WisBlock
+
+**EN pin reads unexpected voltage**
+- Always measure with black probe on the Solar Manager GND pin (top of blue header)
+- Floating readings mean the shared ground wire is missing or not making contact
+
+**GatekeeperModule init message missing from serial**
+- The message fires early in boot — connect the monitor first, then press reset
+- If still missing, run `Select-String "GatekeeperModule" src/modules/Modules.cpp` to confirm registration
+
+**WB_IO1 not declared — build error**
+- The Adafruit nRF52 BSP for RAK4631 doesn't define `WB_IO1` by name
+- The `#ifndef WB_IO1 / #define WB_IO1 17` block in `GatekeeperModule.h` handles this — confirm it's present
+
+---
+
+## Branch Reference
+
+| Branch | Hardware | Purpose |
+|---|---|---|
+| `develop` | RAK4631 | Soil sensor node firmware |
+| `backhaul` | RAK4631 + SparkFun switch + Pi Zero 2W | Earlier field access design (Pi-based) |
+| `gatekeeper` | RAK4631 + DFRobot Solar Manager + Heltec HaLow | Current field access design |
+
+```powershell
+git branch              # see current branch
+git checkout gatekeeper # this branch
+```
