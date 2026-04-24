@@ -3,6 +3,7 @@
 #include "buzz/BuzzerFeedbackThread.h"
 #include "modules/SystemCommandsModule.h"
 #endif
+#include "GatekeeperModule.h"
 #include "modules/StatusLEDModule.h"
 #if !MESHTASTIC_EXCLUDE_REPLYBOT
 #include "ReplyBotModule.h"
@@ -252,4 +253,5 @@ void setupModules()
     // NOTE! This module must be added LAST because it likes to check for replies from other modules and avoid sending extra
     // acks
     routingModule = new RoutingModule();
+    gatekeeperModule = new GatekeeperModule();
 }
