@@ -111,11 +111,16 @@ pio run -e rak4631
 pio run -e rak4631 -t upload
 ```
 
-### Set LoRa Region After First Flash
+### Set LoRa Region After First Flash and configure channel on wisblock
 
 ```powershell
 python -m meshtastic --port COM5 --set lora.region US
 ```
+
+- Go into Meshtastic connect to the wisblock via serial or ble
+- Go into settings and either add channel if on mobile, or channel 2 via web client
+- create (if not already made) or input pre shared key for the channel you want to send the commands into
+- (optional) confirm by sending a message through a separate meshtastic node and making sure packet was acknowledged
 
 ### Confirm the Module Loaded
 
