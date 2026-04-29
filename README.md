@@ -21,7 +21,7 @@ IO1 pulled HIGH → Solar Manager EN pin HIGH → 5V rail enabled
         ↓
 Heltec boots via USB-C pigtail, begins HaLow bridge
         ↓
-"Power Off" received  OR  5-minute watchdog fires
+"Power Off" received  OR  10-minute watchdog fires
         ↓
 IO1 pulled LOW → 5V rail cut → Heltec off
 ```
@@ -91,7 +91,7 @@ Located in `src/modules/GatekeeperModule.h` and `GatekeeperModule.cpp`, register
 
 ```cpp
 #define GATEKEEPER_CHANNEL   2                        // Meshtastic channel index (0-based)
-#define HELTEC_MAX_ON_MS     (5UL * 60UL * 1000UL)   // Auto-shutoff — 5 minutes default
+#define HELTEC_MAX_ON_MS     (5UL * 60UL * 1000UL)   // Auto-shutoff — 10 minutes default
 #define CMD_POWER_ON         "Power On"
 #define CMD_POWER_OFF        "Power Off"
 ```
