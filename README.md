@@ -70,7 +70,7 @@ Use only **red (VBUS)** and **black (GND)**. Tape off remaining wires.
 
 ```
 Solar Panel   ──→  Solar Manager  SOLAR IN  (screw terminal)
-LiPo Battery  ──→  Solar Manager  BAT IN    (screw terminal)
+LiPo Battery  ──→  Solar Manager  BAT IN    (screw terminal or JST)
 
 Solar Manager  USB-A out   ──→  WisBlock  USB power in    (always-on)
 Solar Manager  EN  (mid)   ──→  WisBlock  IO1             (control signal)
