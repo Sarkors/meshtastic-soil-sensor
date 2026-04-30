@@ -163,10 +163,7 @@ static void nbEnter()
     LOG_POWERFSM("State: nbEnter");
     if (screen)
         screen->setOn(false);
-#ifdef ARCH_ESP32
-    // Only ESP32 should turn off bluetooth
     setBluetoothEnable(false);
-#endif
 
     // FIXME - check if we already have packets for phone and immediately trigger EVENT_PACKETS_FOR_PHONE
 }
@@ -399,6 +396,10 @@ void PowerFSM_setup()
     powerFSM.add_timed_transition(&stateDARK, &stateDARK,
                                   Default::getConfiguredOrDefaultMs(config.display.screen_on_secs, default_screen_on_secs), NULL,
                                   "Screen-on timeout");
+    // Shut off bluetooth after the configured window (saves power on nRF52 sensor nodes)
+    powerFSM.add_timed_transition(&stateDARK, &stateNB,
+                                  Default::getConfiguredOrDefaultMs(config.power.wait_bluetooth_secs, default_wait_bluetooth_secs),
+                                  NULL, "Bluetooth timeout");
 #endif
 
     powerFSM.run_machine(); // run one iteration of the state machine, so we run our on enter tasks for the initial DARK state

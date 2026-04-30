@@ -932,8 +932,10 @@ void NodeDB::installRoleDefaults(meshtastic_Config_DeviceConfig_Role role)
         owner.is_unmessagable = true;
         moduleConfig.telemetry.device_update_interval = default_telemetry_broadcast_interval_secs;
         moduleConfig.telemetry.environment_measurement_enabled = true;
-        moduleConfig.telemetry.environment_update_interval = 10800; // 3 hours for field sensor nodes
-	config.position.gps_mode = meshtastic_Config_PositionConfig_GpsMode_NOT_PRESENT; // No hardware GPS on sensor nodes
+        moduleConfig.telemetry.environment_update_interval = 28800; // 8 hours (3x/day) for field sensor nodes
+        config.position.gps_mode = meshtastic_Config_PositionConfig_GpsMode_NOT_PRESENT; // No hardware GPS on sensor nodes
+        config.device.rebroadcast_mode = meshtastic_Config_DeviceConfig_RebroadcastMode_NONE; // Sensor nodes don't forward mesh traffic
+        config.power.wait_bluetooth_secs = 1800; // 30 minutes: useful config window after boot, then BT shuts off
     } else if (role == meshtastic_Config_DeviceConfig_Role_LOST_AND_FOUND) {
         config.position.position_broadcast_smart_enabled = false;
         config.position.position_broadcast_secs = 300; // Every 5 minutes
