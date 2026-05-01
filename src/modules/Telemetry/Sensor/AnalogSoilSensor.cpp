@@ -10,10 +10,8 @@ AnalogSoilSensor::AnalogSoilSensor()
 bool AnalogSoilSensor::initDevice(TwoWire *bus, ScanI2C::FoundDevice *dev)
 {
 #ifdef ANALOG_SOIL_3V3_EN
-    // Enable 3.3V peripheral rail on RAK boards
     pinMode(ANALOG_SOIL_3V3_EN, OUTPUT);
-    digitalWrite(ANALOG_SOIL_3V3_EN, HIGH);
-    delay(100);
+    digitalWrite(ANALOG_SOIL_3V3_EN, LOW); // keep rail off until a reading is needed
 #endif
     pinMode(ANALOG_SOIL_PIN, INPUT);
     LOG_INFO("AnalogSoilSensor: init on GPIO %d", ANALOG_SOIL_PIN);
@@ -32,6 +30,11 @@ int32_t AnalogSoilSensor::runOnce()
 
 bool AnalogSoilSensor::getMetrics(meshtastic_Telemetry *measurement)
 {
+#ifdef ANALOG_SOIL_3V3_EN
+    digitalWrite(ANALOG_SOIL_3V3_EN, HIGH);
+    delay(100); // wait for rail and sensor to stabilize
+#endif
+
     // Discard first 3 reads to flush ADC
     for (int i = 0; i < 3; i++) {
         analogRead(ANALOG_SOIL_PIN);
@@ -45,6 +48,10 @@ bool AnalogSoilSensor::getMetrics(meshtastic_Telemetry *measurement)
         delay(5);
     }
     int raw = total / 5;
+
+#ifdef ANALOG_SOIL_3V3_EN
+    digitalWrite(ANALOG_SOIL_3V3_EN, LOW); // power down rail after reading
+#endif
 
 
 

@@ -392,11 +392,10 @@ void PowerFSM_setup()
 #endif // HAS_WIFI || !defined(MESHTASTIC_EXCLUDE_WIFI)
 
 #else // (not) ARCH_ESP32
-    // If not ESP32, light-sleep not used. Check periodically if config has drifted out of stateDark
-    powerFSM.add_timed_transition(&stateDARK, &stateDARK,
-                                  Default::getConfiguredOrDefaultMs(config.display.screen_on_secs, default_screen_on_secs), NULL,
-                                  "Screen-on timeout");
-    // Shut off bluetooth after the configured window (saves power on nRF52 sensor nodes)
+    // Shut off bluetooth after the configured window (saves power on nRF52 sensor nodes).
+    // Note: do NOT add a DARK->DARK self-loop here. The FSM library resets all timed transitions
+    // from the current state on every transition, so a self-loop would continuously reset this
+    // timer and BT would never shut off.
     powerFSM.add_timed_transition(&stateDARK, &stateNB,
                                   Default::getConfiguredOrDefaultMs(config.power.wait_bluetooth_secs, default_wait_bluetooth_secs),
                                   NULL, "Bluetooth timeout");
