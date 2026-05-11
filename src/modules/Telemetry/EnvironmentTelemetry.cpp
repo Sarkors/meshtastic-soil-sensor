@@ -660,49 +660,6 @@ bool EnvironmentTelemetryModule::sendTelemetry(NodeNum dest, bool phoneOnly)
             LOG_INFO("Send packet to mesh");
             service->sendToMesh(p, RX_SRC_LOCAL, true);
 
-            if (m.variant.environment_metrics.has_soil_moisture) {
-                // Build uptime string
-                uint32_t uptimeSecs = millis() / 1000;
-                uint32_t hours = uptimeSecs / 3600;
-                uint32_t mins = (uptimeSecs % 3600) / 60;
-
-                // Build battery string
-                char batStr[20];
-                if (powerStatus->getIsCharging() || powerStatus->getBatteryChargePercent() > 100) {
-                    snprintf(batStr, sizeof(batStr), "USB");
-                } else {
-                    snprintf(batStr, sizeof(batStr), "%u%% (%.2fV)",
-                             powerStatus->getBatteryChargePercent(),
-                             powerStatus->getBatteryVoltageMv() / 1000.0f);
-                }
-
-                // Build full message
-                char relayMsg[128];
-                snprintf(relayMsg, sizeof(relayMsg), "Soil: %u%% | Bat: %s | Up: %uh %um",
-                         m.variant.environment_metrics.soil_moisture,
-                         batStr,
-                         hours,
-                         mins);
-
-                // Find navamesh channel index
-                uint8_t navaCh = 0;
-                for (uint8_t i = 0; i < channelFile.channels_count; i++) {
-                    if (strcmp(channelFile.channels[i].settings.name, "navamesh") == 0) {
-                        navaCh = i;
-                        break;
-                    }
-                }
-
-                meshtastic_MeshPacket *txt = router->allocForSending();
-                txt->to = NODENUM_BROADCAST;
-                txt->channel = navaCh;
-                txt->decoded.portnum = meshtastic_PortNum_TEXT_MESSAGE_APP;
-                txt->decoded.payload.size = strlen(relayMsg);
-                memcpy(txt->decoded.payload.bytes, relayMsg, txt->decoded.payload.size);
-                txt->priority = meshtastic_MeshPacket_Priority_DEFAULT;
-                LOG_INFO("TelemetryRelay: sending '%s' to channel %d", relayMsg, navaCh);
-                service->sendToMesh(txt, RX_SRC_LOCAL, true);
-            }
 
             if (config.device.role == meshtastic_Config_DeviceConfig_Role_SENSOR && config.power.is_power_saving) {
                 meshtastic_ClientNotification *notification = clientNotificationPool.allocZeroed();

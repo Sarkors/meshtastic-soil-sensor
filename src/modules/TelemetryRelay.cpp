@@ -1,6 +1,7 @@
 #include "TelemetryRelay.h"
 #include "MeshService.h"
 #include "NodeDB.h"
+#include "PowerStatus.h"
 #include "Router.h"
 #include "configuration.h"
 #include <pb_decode.h>
@@ -36,19 +37,34 @@ ProcessMessage TelemetryRelayModule::handleReceived(const meshtastic_MeshPacket 
         return ProcessMessage::CONTINUE;
     }
 
-    // Only handle environment metrics
+    // Only handle environment metrics with soil moisture
     if (telemetry.which_variant != meshtastic_Telemetry_environment_metrics_tag)
         return ProcessMessage::CONTINUE;
 
     const auto &env = telemetry.variant.environment_metrics;
 
-    // Build the message string
-    char msg[64];
-    if (env.has_soil_moisture) {
-        snprintf(msg, sizeof(msg), "Soil: %u%%", env.soil_moisture);
-    } else {
+    if (!env.has_soil_moisture)
         return ProcessMessage::CONTINUE;
+
+    // Build uptime string
+    uint32_t uptimeSecs = millis() / 1000;
+    uint32_t hours = uptimeSecs / 3600;
+    uint32_t mins = (uptimeSecs % 3600) / 60;
+
+    // Build battery string
+    char batStr[20];
+    if (powerStatus->getIsCharging() || powerStatus->getBatteryChargePercent() > 100) {
+        snprintf(batStr, sizeof(batStr), "USB");
+    } else {
+        snprintf(batStr, sizeof(batStr), "%u%% (%.2fV)",
+                 powerStatus->getBatteryChargePercent(),
+                 powerStatus->getBatteryVoltageMv() / 1000.0f);
     }
+
+    // Build full relay message
+    char msg[128];
+    snprintf(msg, sizeof(msg), "Soil: %u%% | Bat: %s | Up: %uh %um",
+             env.soil_moisture, batStr, hours, mins);
 
     // Find the target channel
     uint8_t channelIndex = findChannelByName(RELAY_CHANNEL_NAME);

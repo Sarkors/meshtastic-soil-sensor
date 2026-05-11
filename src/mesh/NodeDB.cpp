@@ -936,6 +936,7 @@ void NodeDB::installRoleDefaults(meshtastic_Config_DeviceConfig_Role role)
         config.position.gps_mode = meshtastic_Config_PositionConfig_GpsMode_NOT_PRESENT; // No hardware GPS on sensor nodes
         config.device.rebroadcast_mode = meshtastic_Config_DeviceConfig_RebroadcastMode_NONE; // Sensor nodes don't forward mesh traffic
         config.power.wait_bluetooth_secs = 1800; // 30 minutes: useful config window after boot, then BT shuts off
+        config.position.position_broadcast_secs = ONE_DAY; // Static nodes — broadcast position once/day (immediate send still fires on set/boot)
     } else if (role == meshtastic_Config_DeviceConfig_Role_LOST_AND_FOUND) {
         config.position.position_broadcast_smart_enabled = false;
         config.position.position_broadcast_secs = 300; // Every 5 minutes
