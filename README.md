@@ -61,7 +61,7 @@ Settings revert to firmware defaults on factory reset.
 
 | HD-38 Pin | RAK19007 Pin |
 |-----------|--------------|
-| VCC | 3V3 |
+| VCC | IO2/3V3 |
 | GND | GND |
 | A0 | AIN1 (P0.31) |
 | D0 | Not connected |
