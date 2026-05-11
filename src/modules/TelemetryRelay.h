@@ -6,7 +6,10 @@
 class TelemetryRelayModule : public SinglePortModule
 {
   public:
-    TelemetryRelayModule() : SinglePortModule("TelemetryRelay", meshtastic_PortNum_TELEMETRY_APP) {}
+    TelemetryRelayModule() : SinglePortModule("TelemetryRelay", meshtastic_PortNum_TELEMETRY_APP)
+    {
+        loopbackOk = true; // Must be set to receive this node's own outgoing telemetry packets
+    }
 
   protected:
     virtual ProcessMessage handleReceived(const meshtastic_MeshPacket &mp) override;
