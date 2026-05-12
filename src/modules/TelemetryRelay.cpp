@@ -73,6 +73,10 @@ ProcessMessage TelemetryRelayModule::handleReceived(const meshtastic_MeshPacket 
 
     // Send as text message on target channel
     meshtastic_MeshPacket *p = router->allocForSending();
+    if (!p) {
+        LOG_WARN("TelemetryRelay: packet pool exhausted, dropping relay");
+        return ProcessMessage::CONTINUE;
+    }
     p->to = NODENUM_BROADCAST;
     p->channel = channelIndex;
     p->decoded.portnum = meshtastic_PortNum_TEXT_MESSAGE_APP;
