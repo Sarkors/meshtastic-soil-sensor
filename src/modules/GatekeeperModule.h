@@ -29,7 +29,7 @@
 
 // Maximum time (ms) to leave the Heltec powered before auto-shutoff.
 // Keeps energy balance positive during low-sun periods.
-#define HELTEC_MAX_ON_MS (5UL * 60UL * 1000UL)   // 5 minutes default
+#define HELTEC_MAX_ON_MS (10UL * 60UL * 1000UL)   // 10 minutes default
 
 // ── Command Strings ───────────────────────────────────────────────────────────
 
