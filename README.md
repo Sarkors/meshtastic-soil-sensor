@@ -28,6 +28,9 @@ IO1 pulled LOW → 5V rail cut → Heltec off
 
 <img width="906" height="571" alt="gatekeeperdiagram" src="https://github.com/user-attachments/assets/1145fc75-613f-4423-aa74-637ff27ae624" />
 
+<img width="2160" height="2880" alt="BackHaul_imagetitled" src="https://github.com/user-attachments/assets/bf0926eb-79b0-4d2b-9ae2-8ba0b97f187e" />
+
+
 The 1.9W solar panel (~380mA in full sun) easily covers the WisBlock idle draw. Heltec on-time is kept brief to protect the energy balance during cloudy periods.
 
 ---
