@@ -72,7 +72,7 @@ Use only **red (VBUS)** and **black (GND)**. Tape off remaining wires.
 ### Full Wiring Summary
 
 ```
-Solar Panel   ──→  Solar Manager  SOLAR IN  (screw terminal)
+Solar Panel   ──→  Solar Manager  SOLAR IN  (screw terminal or Micro-USB)
 LiPo Battery  ──→  Solar Manager  BAT IN    (screw terminal or JST)
 
 Solar Manager  USB-A out   ──→  WisBlock  USB power in    (always-on)
