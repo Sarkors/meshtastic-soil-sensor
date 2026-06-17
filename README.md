@@ -278,6 +278,13 @@ git checkout backhaul   # for backhaul nodes
 
 See [CONFIGURATION.md](CONFIGURATION.md) for how to update these values.
 
+# Video Setup Walkthroughs 
+## Node Flashing and Meshtastic Configuration 
+https://youtu.be/9rfFNOcalU4
+## What to do with received Soil Sensor Nodes
+https://youtu.be/JMJ5QePX9k8
+
+
 ---
 
 ## Key Lessons Learned
