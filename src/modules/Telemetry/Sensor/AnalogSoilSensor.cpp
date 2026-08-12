@@ -4,8 +4,28 @@
 #include "AnalogSoilSensor.h"
 #include <Arduino.h>
 
-AnalogSoilSensor::AnalogSoilSensor()
-    : TelemetrySensor(meshtastic_TelemetrySensorType_SENSOR_UNSET, "AnalogSoil") {}
+uint16_t AnalogSoilSensor::lastRawAdc = 0;
+bool AnalogSoilSensor::readingPending = false;
+
+bool AnalogSoilSensor::hasPendingReading()
+{
+    return readingPending;
+}
+
+bool AnalogSoilSensor::peekReading(uint16_t &rawAdcOut)
+{
+    if (!readingPending)
+        return false;
+    rawAdcOut = lastRawAdc;
+    return true;
+}
+
+void AnalogSoilSensor::consumeReading()
+{
+    readingPending = false;
+}
+
+AnalogSoilSensor::AnalogSoilSensor() : TelemetrySensor(meshtastic_TelemetrySensorType_SENSOR_UNSET, "AnalogSoil") {}
 
 bool AnalogSoilSensor::initDevice(TwoWire *bus, ScanI2C::FoundDevice *dev)
 {
@@ -32,37 +52,44 @@ bool AnalogSoilSensor::getMetrics(meshtastic_Telemetry *measurement)
 {
 #ifdef ANALOG_SOIL_3V3_EN
     digitalWrite(ANALOG_SOIL_3V3_EN, HIGH);
-    delay(100); // wait for rail and sensor to stabilize
+    delay(ANALOG_SOIL_SETTLE_MS); // wait for rail and sensor to stabilize
 #endif
 
-    // Discard first 3 reads to flush ADC
-    for (int i = 0; i < 3; i++) {
+    // Discard the first few reads to flush the ADC
+    for (int i = 0; i < ANALOG_SOIL_DISCARD_SAMPLES; i++) {
         analogRead(ANALOG_SOIL_PIN);
-        delay(5);
+        delay(ANALOG_SOIL_SAMPLE_GAP_MS);
     }
 
-    // Average 5 readings for stability
-    int total = 0;
-    for (int i = 0; i < 5; i++) {
-        total += analogRead(ANALOG_SOIL_PIN);
-        delay(5);
+    // Average ANALOG_SOIL_SAMPLES readings for stability
+    uint32_t total = 0;
+    for (int i = 0; i < ANALOG_SOIL_SAMPLES; i++) {
+        total += (uint32_t)analogRead(ANALOG_SOIL_PIN);
+        delay(ANALOG_SOIL_SAMPLE_GAP_MS);
     }
-    int raw = total / 5;
+    uint16_t raw = (uint16_t)(total / ANALOG_SOIL_SAMPLES);
 
 #ifdef ANALOG_SOIL_3V3_EN
     digitalWrite(ANALOG_SOIL_3V3_EN, LOW); // power down rail after reading
 #endif
 
+    // RAW ONLY. No constrain(), no map(), no scaling. The Raspberry Pi owns
+    // calibration. `raw` is never reassigned between here and transmission.
+    lastRawAdc = raw;
+    readingPending = true;
 
+    LOG_INFO("AnalogSoilSensor: raw ADC = %u", (unsigned)raw);
 
-raw = constrain(raw, ANALOG_SOIL_WET, ANALOG_SOIL_DRY);
-    int moisture = map(raw, ANALOG_SOIL_DRY, ANALOG_SOIL_WET, 0, 100);
-
-    LOG_INFO("AnalogSoilSensor: raw ADC=%d, moisture=%d%%", raw, moisture);
-
-    measurement->variant.environment_metrics.has_soil_moisture = true;
-    measurement->variant.environment_metrics.soil_moisture = (uint32_t)moisture;
-
+    // Deliberately writes NO EnvironmentMetrics field. The raw count has no home in
+    // the stock protobuf (soil_moisture is a uint8_t percent -- int_size:8 in
+    // telemetry.options, so it cannot hold a 0..4095 count) and we refuse to derive
+    // a percentage on the node.
+    //
+    // We still return true so EnvironmentTelemetryModule::getEnvironmentTelemetry()
+    // reports valid and sendTelemetry() emits its TELEMETRY_APP broadcast -- the
+    // local loopback of that broadcast is what drives TelemetryRelayModule. The
+    // resulting EnvironmentMetrics submessage is empty; that is the deliberate cost
+    // of preserving the existing trigger chain without restructuring the module.
     return true;
 }
 

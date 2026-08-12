@@ -1,38 +1,88 @@
 # Configuration Guide
 
-## Sensor Calibration
+## Sensor Calibration (Raspberry Pi side)
 
-The calibration values determine how raw ADC readings are converted to moisture percentages. These are set in `src/modules/Telemetry/Sensor/AnalogSoilSensor.h`.
+**The node performs no calibration.** It reads the HD-38, averages 5 ADC samples, and
+transmits that raw count untouched. There are deliberately no `ANALOG_SOIL_DRY` /
+`ANALOG_SOIL_WET` constants in the firmware any more — calibration lives entirely on the
+Pi so it can be retuned without reflashing deployed nodes.
 
 ### How to Calibrate
 
-1. Flash the firmware and open the serial monitor
-2. Stick the sensor in **dry soil** — note the raw ADC value
-3. Stick the sensor in **wet/muddy soil** — note the raw ADC value
-4. Update the values in `AnalogSoilSensor.h`:
+1. Open the serial monitor (or watch the Pi's bridge log) and note the raw ADC in
+   **dry soil**, then in **wet/muddy soil**.
+2. On the Raspberry Pi, set the two values in `.env`:
 
-**For RAK4631:**
+   ```
+   SOIL_ADC_DRY=3120    # reads as 0%
+   SOIL_ADC_WET=1567    # reads as 100%
+   ```
 
-```cpp
-#if defined(RAK4630)
-    #define ANALOG_SOIL_PIN     31      // AIN1 = P0.31
-    #define ANALOG_SOIL_DRY     3040    // ← your dry soil reading
-    #define ANALOG_SOIL_WET     1567    // ← your wet soil reading
-    #define ANALOG_SOIL_BITS    4095
-    #define ANALOG_SOIL_3V3_EN  34
+3. Restart the bridge — **no rebuild, no reflash**:
+
+   ```
+   cd /home/pi/Navamesh && docker compose up -d --build bridge
+   ```
+
+The raw ADC is always stored verbatim as `soil_raw`; only the derived `soil_percent` is
+clamped to 0–100. Because both are stored, historical raw data can be re-derived against
+a new curve at any time.
+
+The curve itself is `adc_to_percent()` in `src/navamesh/calibration.py` in the
+`Navamesh-main` repo.
+
+### Node-side hardware settings
+
+These are the only sensor knobs left in the firmware, in
+`src/modules/Telemetry/Sensor/AnalogSoilSensor.h`:
+
+| Macro | RAK4631 | Purpose |
+|-------|---------|---------|
+| `ANALOG_SOIL_PIN` | 31 | AIN1 = P0.31 |
+| `ANALOG_SOIL_3V3_EN` | 34 | must be HIGH to power the sensor |
+| `ANALOG_SOIL_SETTLE_MS` | 100 | rail + sensor settle after power-on |
+| `ANALOG_SOIL_DISCARD_SAMPLES` | 3 | throwaway reads to flush the SAADC |
+| `ANALOG_SOIL_SAMPLES` | 5 | reads that get averaged |
+| `ANALOG_SOIL_SAMPLE_GAP_MS` | 5 | delay between reads |
+
+---
+
+## Wire Format
+
+The reading is sent as a private protobuf, **not** as Meshtastic environment telemetry.
+Meshtastic's `protobufs/` submodule is deliberately left untouched, so there is no risk of
+colliding with a field number upstream assigns later.
+
+`proto/navamesh/navamesh.proto`:
+
+```proto
+syntax = "proto3";
+package navamesh;
+
+message SoilReading {
+  uint32 raw_adc         = 1;
+  uint32 battery_percent = 2;
+  uint32 battery_mv      = 3;
+  uint32 uptime_seconds  = 4;
+}
 ```
 
-**For Heltec v3:**
+Sent on **PortNum 256 (PRIVATE_APP)**, broadcast on the `navamesh` channel.
 
-```cpp
-#elif defined(HELTEC_V3)
-    #define ANALOG_SOIL_PIN     7
-    #define ANALOG_SOIL_DRY     3500    // ← your dry soil reading
-    #define ANALOG_SOIL_WET     1500    // ← your wet soil reading
-    #define ANALOG_SOIL_BITS    4095
+To regenerate the nanopb classes after editing the `.proto`:
+
+```
+./bin/regen-navamesh-proto.sh
 ```
 
-5. Rebuild and reflash after updating values.
+This requires nanopb 0.4.9.1 in the firmware root as `nanopb-0.4.9/` (the same
+prerequisite as the stock `bin/regen-protos.sh`; that directory is gitignored). The script
+writes only `src/mesh/generated/navamesh/` and never touches `protobufs/` or
+`src/mesh/generated/meshtastic/`.
+
+Decoder notes: proto3 omits zero-valued scalars, so absent fields must default to 0; and
+the payload is encrypted with the `navamesh` channel PSK, so the gateway must be
+provisioned on that channel to read it.
 
 ---
 
@@ -117,13 +167,18 @@ The relay messages are sent to a private channel called `navamesh`. Every node t
 
 ### Changing the Channel Name
 
-The channel name is defined in `src/modules/Telemetry/EnvironmentTelemetry.cpp` in the relay block:
+The channel name is defined in `src/modules/TelemetryRelay.cpp`:
 
 ```cpp
-if (strcmp(channelFile.channels[i].settings.name, "navamesh") == 0) {
+#define RELAY_CHANNEL_NAME "navamesh"
 ```
 
 Change `"navamesh"` to your preferred channel name, rebuild, and reflash.
+
+> **Note:** if the named channel is not found, the relay falls back to the primary channel
+> (index 0) and logs a warning. Because the reading is encrypted with the channel PSK,
+> that fallback means readings go out on a channel the Pi may not be listening on — check
+> for `channel 'navamesh' not found` in the serial log if data stops arriving.
 
 ---
 
@@ -163,7 +218,9 @@ python -m meshtastic --port COMX --set lora.region US
 
 ### Environment Metrics Greyed Out in App
 
-The Environment Metrics section in the Meshtastic app will be greyed out until the node sends its first telemetry reading. This is normal. To trigger it immediately, connect your phone via BLE — telemetry fires right away when a phone connects. After the first reading, the section becomes active.
+The Environment Metrics section in the Meshtastic app stays greyed out **permanently**, and that is expected. The node deliberately writes no EnvironmentMetrics fields — the reading travels in its own `navamesh.SoilReading` protobuf on PortNum 256 instead.
+
+The node still emits an otherwise-empty environment telemetry packet each cycle, because the local loopback of that packet is what triggers `TelemetryRelayModule`. It costs a few bytes of airtime and keeps the existing trigger chain intact.
 
 ### Navamesh Relay Only Works Without Phone Connected
 
