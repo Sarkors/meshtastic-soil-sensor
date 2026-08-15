@@ -4,8 +4,7 @@
 #include "PowerStatus.h"
 #include "Router.h"
 #include "configuration.h"
-#include "mesh-pb-constants.h" // pb_encode_to_bytes / pb_decode_from_bytes
-#include <pb_decode.h>
+#include "mesh-pb-constants.h" // pb_encode_to_bytes
 
 #if !MESHTASTIC_EXCLUDE_ENVIRONMENTAL_SENSOR
 #include "Telemetry/Sensor/AnalogSoilSensor.h"
@@ -15,6 +14,14 @@ TelemetryRelayModule *telemetryRelayModule;
 
 // Name of the channel to relay telemetry to
 #define RELAY_CHANNEL_NAME "navamesh"
+
+// How often the thread checks whether AnalogSoilSensor has produced a reading.
+//
+// This is a lightweight flag check, NOT a sensor measurement interval. The ADC is sampled
+// only by EnvironmentTelemetryModule on the configured telemetry.environment_update_interval;
+// this value only bounds how long a finished reading waits before it goes out, and how
+// quickly a failed send is retried.
+#define RELAY_POLL_INTERVAL_MS 1000
 
 static uint8_t findChannelByName(const char *name)
 {
@@ -33,8 +40,7 @@ static uint8_t findChannelByName(const char *name)
 
 // Wrap-safe uptime. DeviceTelemetryModule::getUptimeSeconds() is protected and its wrap
 // counter only advances from inside that module, so we keep our own rather than editing
-// upstream. Sampled once per telemetry cycle (<= 3 h), far below the ~49.7 day millis()
-// wrap, so a wrap can never be missed in practice.
+// upstream. Polled far more often than the ~49.7 day millis() wrap, so a wrap is never missed.
 static uint32_t uptimeWrapCount = 0;
 static uint32_t uptimeLastMs = 0;
 
@@ -47,34 +53,27 @@ static uint32_t relayUptimeSeconds()
     return (0xFFFFFFFF / 1000) * uptimeWrapCount + (now / 1000);
 }
 
-ProcessMessage TelemetryRelayModule::handleReceived(const meshtastic_MeshPacket &mp)
+int32_t TelemetryRelayModule::runOnce()
 {
 #if MESHTASTIC_EXCLUDE_ENVIRONMENTAL_SENSOR
-    return ProcessMessage::CONTINUE;
+    return disable();
 #else
-    // Only relay our own outgoing telemetry, not packets from other nodes
-    if (mp.from != nodeDB->getNodeNum())
-        return ProcessMessage::CONTINUE;
+    // Cheap flag check. Nothing to do until AnalogSoilSensor::getMetrics() has run, which
+    // happens on the configured environment telemetry interval and nowhere else.
+    if (AnalogSoilSensor::hasPendingReading())
+        sendPendingReading(); // leaves the reading pending if it fails, so we retry below
 
-    // Decode the telemetry payload
-    meshtastic_Telemetry telemetry = meshtastic_Telemetry_init_zero;
-    if (!pb_decode_from_bytes(mp.decoded.payload.bytes, mp.decoded.payload.size, &meshtastic_Telemetry_msg, &telemetry)) {
-        return ProcessMessage::CONTINUE;
-    }
+    return RELAY_POLL_INTERVAL_MS;
+#endif
+}
 
-    // Only the environment variant is our trigger. DeviceTelemetryModule also broadcasts
-    // on TELEMETRY_APP (device_metrics / local_stats) and must not fire the relay.
-    if (telemetry.which_variant != meshtastic_Telemetry_environment_metrics_tag)
-        return ProcessMessage::CONTINUE;
-
-    // The reading no longer travels inside the telemetry payload - the node writes no
-    // EnvironmentMetrics field at all. Peek it from the sensor instead. Peeking does not
-    // clear the pending flag; we only consume it after the packet is actually sent, so a
-    // failed encode does not silently discard a measurement. If nothing is pending this
-    // is an unrelated environment-telemetry loopback and must not produce a soil packet.
+#if !MESHTASTIC_EXCLUDE_ENVIRONMENTAL_SENSOR
+bool TelemetryRelayModule::sendPendingReading()
+{
+    // Peek does not clear the pending flag; we consume only after a successful send.
     uint16_t rawAdcSample = 0;
     if (!AnalogSoilSensor::peekReading(rawAdcSample))
-        return ProcessMessage::CONTINUE;
+        return false;
 
     const uint32_t rawAdc = rawAdcSample;
     const uint8_t batPercent = powerStatus->getBatteryChargePercent();
@@ -87,7 +86,6 @@ ProcessMessage TelemetryRelayModule::handleReceived(const meshtastic_MeshPacket 
     const uint8_t channelIndex = findChannelByName(RELAY_CHANNEL_NAME);
 
     // ---- 1. Authoritative packet: navamesh.SoilReading on PortNum 256 ---------------
-    // Sent first so that if the TX queue is tight, the packet the Pi needs wins.
     navamesh_SoilReading reading = navamesh_SoilReading_init_zero;
     reading.raw_adc = rawAdc;
     reading.battery_percent = batPercent;
@@ -100,8 +98,8 @@ ProcessMessage TelemetryRelayModule::handleReceived(const meshtastic_MeshPacket 
 
     meshtastic_MeshPacket *pbPkt = router->allocForSending();
     if (!pbPkt) {
-        LOG_WARN("TelemetryRelay: packet pool exhausted, dropping SoilReading");
-        return ProcessMessage::CONTINUE; // reading stays pending
+        LOG_WARN("TelemetryRelay: packet pool exhausted, retry SoilReading next poll");
+        return false; // reading stays pending
     }
     pbPkt->to = NODENUM_BROADCAST;
     pbPkt->channel = channelIndex;
@@ -113,18 +111,19 @@ ProcessMessage TelemetryRelayModule::handleReceived(const meshtastic_MeshPacket 
     if (pbPkt->decoded.payload.size == 0) {
         // pb_encode_to_bytes logs and returns 0 on failure (it does not panic, despite
         // its header comment). Release the slot and leave the reading pending.
-        LOG_ERROR("TelemetryRelay: SoilReading encode failed, dropping");
+        LOG_ERROR("TelemetryRelay: SoilReading encode failed, retry next poll");
         packetPool.release(pbPkt);
-        return ProcessMessage::CONTINUE;
+        return false; // reading stays pending
     }
     service->sendToMesh(pbPkt, RX_SRC_LOCAL, true);
 
-    // The reading has now been encoded and handed to the mesh. Consume it so that a
-    // later unrelated TELEMETRY_APP loopback cannot retransmit this same stale ADC
-    // value - only a fresh ADC measurement can produce another soil packet.
+    // The reading has now been encoded and handed to the mesh. Consume it so the same
+    // value can never be transmitted twice; only a fresh ADC measurement re-arms us.
     AnalogSoilSensor::consumeReading();
 
-    // ---- 2. Human-readable debug line (same transport as before, new content) -------
+    // ---- 2. Human-readable debug line (optional, best effort) -----------------------
+    // Deliberately after consumeReading(): the authoritative packet is already away, so a
+    // failure here must not cause the reading to be resent on the next poll.
     char batStr[20];
     if (powerStatus->getIsCharging() || batPercent > 100) {
         snprintf(batStr, sizeof(batStr), "USB");
@@ -141,7 +140,7 @@ ProcessMessage TelemetryRelayModule::handleReceived(const meshtastic_MeshPacket 
     meshtastic_MeshPacket *txt = router->allocForSending();
     if (!txt) {
         LOG_WARN("TelemetryRelay: packet pool exhausted, dropping debug text");
-        return ProcessMessage::CONTINUE;
+        return true; // the authoritative packet already went out
     }
     txt->to = NODENUM_BROADCAST;
     txt->channel = channelIndex;
@@ -151,6 +150,6 @@ ProcessMessage TelemetryRelayModule::handleReceived(const meshtastic_MeshPacket 
     txt->priority = meshtastic_MeshPacket_Priority_DEFAULT;
     service->sendToMesh(txt, RX_SRC_LOCAL, true);
 
-    return ProcessMessage::CONTINUE;
-#endif
+    return true;
 }
+#endif
