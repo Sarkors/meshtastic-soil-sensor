@@ -1,5 +1,6 @@
 #include "TelemetryRelay.h"
 #include "MeshService.h"
+#include "NavameshCommand.h" // isQuietModeActive()
 #include "NodeDB.h"
 #include "PowerStatus.h"
 #include "Router.h"
@@ -70,6 +71,12 @@ int32_t TelemetryRelayModule::runOnce()
 #if !MESHTASTIC_EXCLUDE_ENVIRONMENTAL_SENSOR
 bool TelemetryRelayModule::sendPendingReading()
 {
+    // Quiet mode suppresses RF egress only. Returning false leaves the reading pending, so the
+    // freshest value goes out on the first poll after quiet mode ends rather than being lost.
+    // One guard here covers both the authoritative SoilReading and the debug text below.
+    if (NavameshCommandModule::isQuietModeActive())
+        return false;
+
     // Peek does not clear the pending flag; we consume only after a successful send.
     uint16_t rawAdcSample = 0;
     if (!AnalogSoilSensor::peekReading(rawAdcSample))

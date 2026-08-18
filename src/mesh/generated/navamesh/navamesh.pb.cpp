@@ -9,4 +9,12 @@
 PB_BIND(navamesh_SoilReading, navamesh_SoilReading, AUTO)
 
 
+PB_BIND(navamesh_NavameshCommand, navamesh_NavameshCommand, AUTO)
+
+
+PB_BIND(navamesh_NavameshAck, navamesh_NavameshAck, AUTO)
+
+
+
+
 

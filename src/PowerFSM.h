@@ -28,6 +28,14 @@
 #define EVENT_SHUTDOWN 16        // force a full shutdown now (not just sleep)
 #define EVENT_INPUT 17           // input broker wants something, we need to wake up and enable screen
 
+// Navamesh: a maintenance window was commanded over LoRa. Pulls the node back into stateDARK so
+// darkEnter() turns Bluetooth on. This is the ONLY way a headless RAK4631 can become connectable
+// again -- there is no BUTTON_PIN on that variant, so EVENT_PRESS can never fire in the field.
+#define EVENT_BLE_WINDOW_REQUESTED 18
+// Navamesh: the commanded window elapsed. Sends the node to stateNB so nbEnter() turns Bluetooth
+// off again, on our schedule rather than config.power.wait_bluetooth_secs'.
+#define EVENT_BLE_WINDOW_EXPIRED 19
+
 #if MESHTASTIC_EXCLUDE_POWER_FSM
 class FakeFsm
 {

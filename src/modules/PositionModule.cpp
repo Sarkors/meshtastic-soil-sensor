@@ -1,6 +1,7 @@
 #if !MESHTASTIC_EXCLUDE_GPS
 #include "PositionModule.h"
 #include "Default.h"
+#include "modules/NavameshCommand.h" // isQuietModeActive()
 #include "GPS.h"
 #include "MeshService.h"
 #include "NodeDB.h"
@@ -359,6 +360,12 @@ void PositionModule::sendOurPosition()
 
 void PositionModule::sendOurPosition(NodeNum dest, bool wantReplies, uint8_t channel)
 {
+    // Every position-send path funnels through this overload, so one guard covers them all.
+    if (NavameshCommandModule::isQuietModeActive()) {
+        LOG_DEBUG("Skip position send; Navamesh quiet mode active");
+        return;
+    }
+
     if (!config.position.fixed_position && !nodeDB->hasLocalPositionSinceBoot()) {
         LOG_DEBUG("Skip position send; no fresh position since boot");
         return;

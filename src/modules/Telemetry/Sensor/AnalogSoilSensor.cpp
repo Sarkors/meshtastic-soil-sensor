@@ -85,11 +85,18 @@ bool AnalogSoilSensor::getMetrics(meshtastic_Telemetry *measurement)
     // telemetry.options, so it cannot hold a 0..4095 count) and we refuse to derive
     // a percentage on the node.
     //
-    // We still return true so EnvironmentTelemetryModule::getEnvironmentTelemetry()
-    // reports valid and sendTelemetry() emits its TELEMETRY_APP broadcast -- the
-    // local loopback of that broadcast is what drives TelemetryRelayModule. The
-    // resulting EnvironmentMetrics submessage is empty; that is the deliberate cost
-    // of preserving the existing trigger chain without restructuring the module.
+    // Transmission is NOT driven from here. TelemetryRelayModule polls
+    // hasPendingReading() from its own OSThread and sends the PRIVATE_APP packet on its
+    // own schedule -- the readingPending flag set above is the entire handoff. Chaining
+    // the relay to this module's TELEMETRY_APP broadcast is precisely the coupling that
+    // used to make PRIVATE_APP go silent whenever the telemetry send stopped. Do not
+    // reintroduce it.
+    //
+    // We return true only so EnvironmentTelemetryModule::getEnvironmentTelemetry()
+    // marks the read valid and sendTelemetry() emits its TELEMETRY_APP broadcast, with
+    // the EnvironmentMetrics submessage riding along empty. getMetrics() is called
+    // unconditionally either way, so the pending flag -- and therefore the relay -- is
+    // unaffected by what we return here.
     return true;
 }
 

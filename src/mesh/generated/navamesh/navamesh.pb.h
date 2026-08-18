@@ -9,8 +9,45 @@
 #error Regenerate this file with the current version of nanopb generator.
 #endif
 
+/* Enum definitions */
+/* What a NavameshCommand asks a node to do.
+
+ Numeric arguments are carried in NavameshCommand rather than encoded per-type,
+ so adding a command later does not disturb existing field numbers. Bounds are
+ enforced in firmware constants, NOT here -- limits can then be retuned by a
+ firmware bump without a proto regen on both sides. */
+typedef enum _navamesh_NavameshCommandType {
+    navamesh_NavameshCommandType_NAVAMESH_COMMAND_UNKNOWN = 0,
+    /* Enable Bluetooth for duration_minutes, then disable it automatically.
+ This is how the field crew gets a connectable node without opening the
+ solar case: broadcast the window, walk up, connect, and it closes itself. */
+    navamesh_NavameshCommandType_BLE_WINDOW = 1,
+    /* Set moduleConfig.telemetry.environment_update_interval to interval_seconds.
+ Takes effect on the next telemetry cycle with NO reboot, and persists. */
+    navamesh_NavameshCommandType_SET_TELEMETRY_INTERVAL = 2,
+    /* Stop transmitting telemetry and position. The receiver stays on, so the node
+ still hears QUIET_MODE_EXIT. duration_minutes is a safety ceiling after
+ which the node resumes on its own, so a lost exit command cannot silence a
+ node indefinitely. Never persisted -- any reboot resumes normal operation. */
+    navamesh_NavameshCommandType_QUIET_MODE_ENTER = 3,
+    /* Resume transmitting immediately. */
+    navamesh_NavameshCommandType_QUIET_MODE_EXIT = 4
+} navamesh_NavameshCommandType;
+
 /* Struct definitions */
-/* Private Navamesh wire format, sent on Meshtastic PortNum 256 (PRIVATE_APP).
+/* Private Navamesh wire format.
+
+ Three messages on three portnums, all on the "navamesh" channel:
+   SoilReading    PortNum 256 (PRIVATE_APP)  node -> Pi, broadcast
+   NavameshCommand PortNum 258              Pi -> node, unicast or broadcast
+   NavameshAck    PortNum 259               node -> Pi, unicast
+
+ Separate portnums (rather than multiplexing everything onto 256) mean the
+ receiving module's portnum filter does all the discrimination: there is no
+ decode-order rule, no ambiguity, and SoilReading stays byte-for-byte identical
+ to what the 18 deployed nodes already send. Only 256 and 257
+ (ATAK_FORWARDER) are assigned upstream; 258-510 are free and _PortNum_MAX is
+ 511, so 258/259 cannot collide with a stock portnum.
 
  This is NOT part of upstream Meshtastic. The protobufs/ submodule is never
  modified, so there is no risk of colliding with a field number that upstream
@@ -41,20 +78,80 @@ typedef struct _navamesh_SoilReading {
     uint32_t uptime_seconds;
 } navamesh_SoilReading;
 
+/* Pi -> node, PortNum 258.
+
+ There is deliberately no target-node field. Meshtastic's own routing already
+ does the addressing: MeshModule::callModules() computes
+ toUs = isBroadcast(mp.to) || isToUs(&mp) and only dispatches matching packets,
+ so mp.to = NODENUM_BROADCAST reaches every node and mp.to = <nodenum> reaches
+ exactly one. */
+typedef struct _navamesh_NavameshCommand {
+    navamesh_NavameshCommandType command_type;
+    /* Sender-chosen nonce, echoed in NavameshAck.command_id so the Pi can
+ correlate a reply to the command that caused it.
+
+ Also the replay guard: a node rejects any command_id that is not strictly
+ greater than the last one it accepted. This channel has no PKI (trust is the
+ channel PSK), so without this a captured packet could simply be replayed. */
+    uint32_t command_id;
+    /* BLE_WINDOW and QUIET_MODE_ENTER. 0 means "use the firmware default". */
+    uint32_t duration_minutes;
+    /* SET_TELEMETRY_INTERVAL only. */
+    uint32_t interval_seconds;
+} navamesh_NavameshCommand;
+
+/* node -> Pi, PortNum 259, unicast back to the commanding node.
+
+ Also sent UNSOLICITED with command_id = 0 and command_type = QUIET_MODE_EXIT
+ when quiet mode self-expires, so the Pi learns a node recovered on its own
+ even though nobody sent it an exit command. */
+typedef struct _navamesh_NavameshAck {
+    uint32_t command_id;
+    navamesh_NavameshCommandType command_type;
+    /* False when the command was malformed or the value was out of range. */
+    bool ok;
+    /* The value actually applied AFTER clamping, so the Pi can report "you asked
+ for 5 s, the node applied 30 s" rather than silently disagreeing with it. */
+    uint32_t applied_value;
+} navamesh_NavameshAck;
+
 
 #ifdef __cplusplus
 extern "C" {
 #endif
 
+/* Helper constants for enums */
+#define _navamesh_NavameshCommandType_MIN navamesh_NavameshCommandType_NAVAMESH_COMMAND_UNKNOWN
+#define _navamesh_NavameshCommandType_MAX navamesh_NavameshCommandType_QUIET_MODE_EXIT
+#define _navamesh_NavameshCommandType_ARRAYSIZE ((navamesh_NavameshCommandType)(navamesh_NavameshCommandType_QUIET_MODE_EXIT+1))
+
+
+#define navamesh_NavameshCommand_command_type_ENUMTYPE navamesh_NavameshCommandType
+
+#define navamesh_NavameshAck_command_type_ENUMTYPE navamesh_NavameshCommandType
+
+
 /* Initializer values for message structs */
 #define navamesh_SoilReading_init_default        {0, 0, 0, 0}
+#define navamesh_NavameshCommand_init_default    {_navamesh_NavameshCommandType_MIN, 0, 0, 0}
+#define navamesh_NavameshAck_init_default        {0, _navamesh_NavameshCommandType_MIN, 0, 0}
 #define navamesh_SoilReading_init_zero           {0, 0, 0, 0}
+#define navamesh_NavameshCommand_init_zero       {_navamesh_NavameshCommandType_MIN, 0, 0, 0}
+#define navamesh_NavameshAck_init_zero           {0, _navamesh_NavameshCommandType_MIN, 0, 0}
 
 /* Field tags (for use in manual encoding/decoding) */
 #define navamesh_SoilReading_raw_adc_tag         1
 #define navamesh_SoilReading_battery_percent_tag 2
 #define navamesh_SoilReading_battery_mv_tag      3
 #define navamesh_SoilReading_uptime_seconds_tag  4
+#define navamesh_NavameshCommand_command_type_tag 1
+#define navamesh_NavameshCommand_command_id_tag  2
+#define navamesh_NavameshCommand_duration_minutes_tag 3
+#define navamesh_NavameshCommand_interval_seconds_tag 4
+#define navamesh_NavameshAck_command_id_tag      1
+#define navamesh_NavameshAck_command_type_tag    2
+#define navamesh_NavameshAck_ok_tag              3
+#define navamesh_NavameshAck_applied_value_tag   4
 
 /* Struct field encoding specification for nanopb */
 #define navamesh_SoilReading_FIELDLIST(X, a) \
@@ -65,13 +162,35 @@ X(a, STATIC,   SINGULAR, UINT32,   uptime_seconds,    4)
 #define navamesh_SoilReading_CALLBACK NULL
 #define navamesh_SoilReading_DEFAULT NULL
 
+#define navamesh_NavameshCommand_FIELDLIST(X, a) \
+X(a, STATIC,   SINGULAR, UENUM,    command_type,      1) \
+X(a, STATIC,   SINGULAR, UINT32,   command_id,        2) \
+X(a, STATIC,   SINGULAR, UINT32,   duration_minutes,   3) \
+X(a, STATIC,   SINGULAR, UINT32,   interval_seconds,   4)
+#define navamesh_NavameshCommand_CALLBACK NULL
+#define navamesh_NavameshCommand_DEFAULT NULL
+
+#define navamesh_NavameshAck_FIELDLIST(X, a) \
+X(a, STATIC,   SINGULAR, UINT32,   command_id,        1) \
+X(a, STATIC,   SINGULAR, UENUM,    command_type,      2) \
+X(a, STATIC,   SINGULAR, BOOL,     ok,                3) \
+X(a, STATIC,   SINGULAR, UINT32,   applied_value,     4)
+#define navamesh_NavameshAck_CALLBACK NULL
+#define navamesh_NavameshAck_DEFAULT NULL
+
 extern const pb_msgdesc_t navamesh_SoilReading_msg;
+extern const pb_msgdesc_t navamesh_NavameshCommand_msg;
+extern const pb_msgdesc_t navamesh_NavameshAck_msg;
 
 /* Defines for backwards compatibility with code written before nanopb-0.4.0 */
 #define navamesh_SoilReading_fields &navamesh_SoilReading_msg
+#define navamesh_NavameshCommand_fields &navamesh_NavameshCommand_msg
+#define navamesh_NavameshAck_fields &navamesh_NavameshAck_msg
 
 /* Maximum encoded size of messages (where known) */
 #define NAVAMESH_NAVAMESH_NAVAMESH_PB_H_MAX_SIZE navamesh_SoilReading_size
+#define navamesh_NavameshAck_size                16
+#define navamesh_NavameshCommand_size            20
 #define navamesh_SoilReading_size                24
 
 #ifdef __cplusplus

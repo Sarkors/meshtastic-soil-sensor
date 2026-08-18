@@ -31,6 +31,7 @@
 #include "Sensor/RCWL9620Sensor.h"
 #include "Sensor/nullSensor.h"
 #include "Sensor/AnalogSoilSensor.h"
+#include "modules/NavameshCommand.h" // isQuietModeActive()
 
 namespace graphics
 {
@@ -332,7 +333,7 @@ int32_t EnvironmentTelemetryModule::runOnce()
                                                               moduleConfig.telemetry.environment_update_interval,
                                                               default_telemetry_broadcast_interval_secs, numOnlineNodes))) &&
             airTime->isTxAllowedChannelUtil(config.device.role != meshtastic_Config_DeviceConfig_Role_SENSOR) &&
-            airTime->isTxAllowedAirUtil()) {
+            airTime->isTxAllowedAirUtil() && !NavameshCommandModule::isQuietModeActive()) {
             sendTelemetry();
             if (transmitHistory)
                 transmitHistory->setLastSentToMesh(TX_HISTORY_KEY_ENVIRONMENT_TELEMETRY);
