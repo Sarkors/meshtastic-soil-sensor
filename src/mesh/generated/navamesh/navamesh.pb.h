@@ -31,7 +31,17 @@ typedef enum _navamesh_NavameshCommandType {
  node indefinitely. Never persisted -- any reboot resumes normal operation. */
     navamesh_NavameshCommandType_QUIET_MODE_ENTER = 3,
     /* Resume transmitting immediately. */
-    navamesh_NavameshCommandType_QUIET_MODE_EXIT = 4
+    navamesh_NavameshCommandType_QUIET_MODE_EXIT = 4,
+    /* Store latitude_i/longitude_i as this node's fixed position, exactly as the
+ Meshtastic app's "Fixed Position" toggle does over Bluetooth.
+
+ These nodes ship with gps_mode = NOT_PRESENT and have no GPS receiver, so a
+ position can only ever come from outside. Until now that meant standing next
+ to a sealed solar case with the stock app; this carries the same coordinates
+ over LoRa instead. Applied with NO reboot and persisted.
+
+ Never send this to NODENUM_BROADCAST: every node would claim the same spot. */
+    navamesh_NavameshCommandType_SET_LOCATION = 5
 } navamesh_NavameshCommandType;
 
 /* Struct definitions */
@@ -98,6 +108,18 @@ typedef struct _navamesh_NavameshCommand {
     uint32_t duration_minutes;
     /* SET_TELEMETRY_INTERVAL only. */
     uint32_t interval_seconds;
+    /* SET_LOCATION only: degrees * 1e7, the same integer convention (and the same
+ sfixed32 wire type) as meshtastic.Position.latitude_i/longitude_i, so the
+ values drop straight into a meshtastic_Position with no rescaling.
+
+ sfixed32 rather than sint32 because a coordinate is almost never small: the
+ zigzag varint that makes sint32 cheap for values near zero costs 5 bytes for
+ a real longitude, where sfixed32 is always exactly 4.
+
+ 0/0 is rejected rather than applied. It is a valid point in the Gulf of
+ Guinea, but in practice it only ever means "the sender had no GPS fix". */
+    int32_t latitude_i;
+    int32_t longitude_i;
 } navamesh_NavameshCommand;
 
 /* node -> Pi, PortNum 259, unicast back to the commanding node.
@@ -113,6 +135,17 @@ typedef struct _navamesh_NavameshAck {
     /* The value actually applied AFTER clamping, so the Pi can report "you asked
  for 5 s, the node applied 30 s" rather than silently disagreeing with it. */
     uint32_t applied_value;
+    /* SET_LOCATION only: the coordinates actually stored, echoed back.
+
+ applied_value is unsigned and single, so it cannot carry a signed pair. The
+ alternative -- inferring success from the node's next position broadcast --
+ would make confirmation depend on a second packet surviving the mesh, and
+ would say nothing at all while quiet mode is suppressing transmissions.
+
+ Zero on every other command type, which is also what a pre-SET_LOCATION node
+ yields when its acks are decoded by a newer Pi. */
+    int32_t applied_latitude_i;
+    int32_t applied_longitude_i;
 } navamesh_NavameshAck;
 
 
@@ -122,8 +155,8 @@ extern "C" {
 
 /* Helper constants for enums */
 #define _navamesh_NavameshCommandType_MIN navamesh_NavameshCommandType_NAVAMESH_COMMAND_UNKNOWN
-#define _navamesh_NavameshCommandType_MAX navamesh_NavameshCommandType_QUIET_MODE_EXIT
-#define _navamesh_NavameshCommandType_ARRAYSIZE ((navamesh_NavameshCommandType)(navamesh_NavameshCommandType_QUIET_MODE_EXIT+1))
+#define _navamesh_NavameshCommandType_MAX navamesh_NavameshCommandType_SET_LOCATION
+#define _navamesh_NavameshCommandType_ARRAYSIZE ((navamesh_NavameshCommandType)(navamesh_NavameshCommandType_SET_LOCATION+1))
 
 
 #define navamesh_NavameshCommand_command_type_ENUMTYPE navamesh_NavameshCommandType
@@ -133,11 +166,11 @@ extern "C" {
 
 /* Initializer values for message structs */
 #define navamesh_SoilReading_init_default        {0, 0, 0, 0}
-#define navamesh_NavameshCommand_init_default    {_navamesh_NavameshCommandType_MIN, 0, 0, 0}
-#define navamesh_NavameshAck_init_default        {0, _navamesh_NavameshCommandType_MIN, 0, 0}
+#define navamesh_NavameshCommand_init_default    {_navamesh_NavameshCommandType_MIN, 0, 0, 0, 0, 0}
+#define navamesh_NavameshAck_init_default        {0, _navamesh_NavameshCommandType_MIN, 0, 0, 0, 0}
 #define navamesh_SoilReading_init_zero           {0, 0, 0, 0}
-#define navamesh_NavameshCommand_init_zero       {_navamesh_NavameshCommandType_MIN, 0, 0, 0}
-#define navamesh_NavameshAck_init_zero           {0, _navamesh_NavameshCommandType_MIN, 0, 0}
+#define navamesh_NavameshCommand_init_zero       {_navamesh_NavameshCommandType_MIN, 0, 0, 0, 0, 0}
+#define navamesh_NavameshAck_init_zero           {0, _navamesh_NavameshCommandType_MIN, 0, 0, 0, 0}
 
 /* Field tags (for use in manual encoding/decoding) */
 #define navamesh_SoilReading_raw_adc_tag         1
@@ -148,10 +181,14 @@ extern "C" {
 #define navamesh_NavameshCommand_command_id_tag  2
 #define navamesh_NavameshCommand_duration_minutes_tag 3
 #define navamesh_NavameshCommand_interval_seconds_tag 4
+#define navamesh_NavameshCommand_latitude_i_tag  5
+#define navamesh_NavameshCommand_longitude_i_tag 6
 #define navamesh_NavameshAck_command_id_tag      1
 #define navamesh_NavameshAck_command_type_tag    2
 #define navamesh_NavameshAck_ok_tag              3
 #define navamesh_NavameshAck_applied_value_tag   4
+#define navamesh_NavameshAck_applied_latitude_i_tag 5
+#define navamesh_NavameshAck_applied_longitude_i_tag 6
 
 /* Struct field encoding specification for nanopb */
 #define navamesh_SoilReading_FIELDLIST(X, a) \
@@ -166,7 +203,9 @@ X(a, STATIC,   SINGULAR, UINT32,   uptime_seconds,    4)
 X(a, STATIC,   SINGULAR, UENUM,    command_type,      1) \
 X(a, STATIC,   SINGULAR, UINT32,   command_id,        2) \
 X(a, STATIC,   SINGULAR, UINT32,   duration_minutes,   3) \
-X(a, STATIC,   SINGULAR, UINT32,   interval_seconds,   4)
+X(a, STATIC,   SINGULAR, UINT32,   interval_seconds,   4) \
+X(a, STATIC,   SINGULAR, SFIXED32, latitude_i,        5) \
+X(a, STATIC,   SINGULAR, SFIXED32, longitude_i,       6)
 #define navamesh_NavameshCommand_CALLBACK NULL
 #define navamesh_NavameshCommand_DEFAULT NULL
 
@@ -174,7 +213,9 @@ X(a, STATIC,   SINGULAR, UINT32,   interval_seconds,   4)
 X(a, STATIC,   SINGULAR, UINT32,   command_id,        1) \
 X(a, STATIC,   SINGULAR, UENUM,    command_type,      2) \
 X(a, STATIC,   SINGULAR, BOOL,     ok,                3) \
-X(a, STATIC,   SINGULAR, UINT32,   applied_value,     4)
+X(a, STATIC,   SINGULAR, UINT32,   applied_value,     4) \
+X(a, STATIC,   SINGULAR, SFIXED32, applied_latitude_i,   5) \
+X(a, STATIC,   SINGULAR, SFIXED32, applied_longitude_i,   6)
 #define navamesh_NavameshAck_CALLBACK NULL
 #define navamesh_NavameshAck_DEFAULT NULL
 
@@ -188,9 +229,9 @@ extern const pb_msgdesc_t navamesh_NavameshAck_msg;
 #define navamesh_NavameshAck_fields &navamesh_NavameshAck_msg
 
 /* Maximum encoded size of messages (where known) */
-#define NAVAMESH_NAVAMESH_NAVAMESH_PB_H_MAX_SIZE navamesh_SoilReading_size
-#define navamesh_NavameshAck_size                16
-#define navamesh_NavameshCommand_size            20
+#define NAVAMESH_NAVAMESH_NAVAMESH_PB_H_MAX_SIZE navamesh_NavameshCommand_size
+#define navamesh_NavameshAck_size                26
+#define navamesh_NavameshCommand_size            30
 #define navamesh_SoilReading_size                24
 
 #ifdef __cplusplus

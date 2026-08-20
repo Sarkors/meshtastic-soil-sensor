@@ -5,6 +5,10 @@
 #include "Router.h"
 #include "configuration.h"
 #include "mesh-pb-constants.h" // pb_encode_to_bytes
+#include "mesh/TypeConversions.h" // ConvertToPositionLite
+#if !MESHTASTIC_EXCLUDE_GPS
+#include "modules/PositionModule.h" // sendOurPosition()
+#endif
 
 NavameshCommandModule *navameshCommandModule;
 
@@ -50,6 +54,11 @@ bool NavameshCommandModule::quietModeActive = false;
 // isTxAllowedAirUtil() remain the real regulatory backstop; this bound is defence in depth.
 #define NAVAMESH_INTERVAL_MIN_SECONDS 60
 #define NAVAMESH_INTERVAL_MAX_SECONDS 86400
+
+// Fixed position bounds, in degrees * 1e7. Rejected rather than clamped: a clamped coordinate is
+// a different place on Earth, and silently relocating a node is worse than refusing to move it.
+#define NAVAMESH_LATITUDE_I_LIMIT 900000000   // +/- 90 degrees
+#define NAVAMESH_LONGITUDE_I_LIMIT 1800000000 // +/- 180 degrees
 
 // Acks are jittered across this span. A broadcast command lands on all 18 nodes within the same
 // few milliseconds; if they all replied at once the collisions would cost us most of the acks.
@@ -183,6 +192,65 @@ uint32_t NavameshCommandModule::applyQuietModeEnter(uint32_t minutes)
     return clamped;
 }
 
+bool NavameshCommandModule::applySetLocation(int32_t latitudeI, int32_t longitudeI)
+{
+    if (latitudeI < -NAVAMESH_LATITUDE_I_LIMIT || latitudeI > NAVAMESH_LATITUDE_I_LIMIT ||
+        longitudeI < -NAVAMESH_LONGITUDE_I_LIMIT || longitudeI > NAVAMESH_LONGITUDE_I_LIMIT) {
+        LOG_WARN("NavameshCommand: refusing out-of-range position %d, %d", (int)latitudeI, (int)longitudeI);
+        return false;
+    }
+
+    // 0/0 is a real place, but nothing in the Navajo region is within 2000 km of it. Every 0/0
+    // we will ever see is a sender that had no fix and sent its zero-initialised struct anyway.
+    if (latitudeI == 0 && longitudeI == 0) {
+        LOG_WARN("NavameshCommand: refusing 0/0 position (sender had no GPS fix)");
+        return false;
+    }
+
+    // This mirrors AdminModule's set_fixed_position handler exactly, which is the path the
+    // Meshtastic app's "Fixed Position" toggle takes over BLE. Same four writes, same order.
+    // Deliberately not routed through AdminModule itself: reaching it would need an AdminMessage
+    // wrapped in the admin channel's session-key handshake, which is precisely the phone-shaped
+    // ceremony this command exists to avoid.
+    meshtastic_Position pos = meshtastic_Position_init_default;
+    pos.has_latitude_i = true;
+    pos.latitude_i = latitudeI;
+    pos.has_longitude_i = true;
+    pos.longitude_i = longitudeI;
+    // No altitude: the sender is a phone, and phone altitude is unreliable enough that storing it
+    // would be worse than leaving it unset. Nothing downstream reads it.
+    pos.location_source = meshtastic_Position_LocSource_LOC_MANUAL;
+
+    meshtastic_NodeInfoLite *node = nodeDB->getMeshNode(nodeDB->getNodeNum());
+    if (!node) {
+        LOG_ERROR("NavameshCommand: no NodeInfoLite for ourselves, cannot set position");
+        return false;
+    }
+    node->has_position = true;
+    node->position = TypeConversions::ConvertToPositionLite(pos);
+    nodeDB->setLocalPosition(pos);
+    config.position.fixed_position = true;
+
+    // AdminModule saves these same two segments with shouldReboot = false. A position is one of
+    // the few config changes that genuinely applies live: MeshService reads node->position on
+    // every outbound position packet, so the next broadcast already carries the new coordinates.
+    nodeDB->saveToDisk(SEGMENT_NODEDATABASE | SEGMENT_CONFIG);
+
+    // Broadcast immediately rather than waiting out the 15-minute position interval, so the Pi
+    // can confirm on the map that the node moved. Suppressed while quiet mode is active, which is
+    // correct: the ack still carries the coordinates, so nothing is lost but the map update.
+    //
+    // Guarded the same way AdminModule's set_fixed_position guards it. The stored position above
+    // is the part that matters and it lands either way; this only skips the eager broadcast.
+#if !MESHTASTIC_EXCLUDE_GPS
+    if (positionModule)
+        positionModule->sendOurPosition();
+#endif
+
+    LOG_INFO("NavameshCommand: fixed position = %d, %d (live, no reboot)", (int)latitudeI, (int)longitudeI);
+    return true;
+}
+
 void NavameshCommandModule::applyQuietModeExit()
 {
     quietModeActive = false;
@@ -228,7 +296,8 @@ bool NavameshCommandModule::handleReceivedProtobuf(const meshtastic_MeshPacket &
     if (cmd->command_id == lastAcceptedCommandId) {
         LOG_INFO("NavameshCommand: duplicate command_id=%u, re-acking previous result",
                  (unsigned)cmd->command_id);
-        queueAck(mp.from, lastAcceptedCommandId, lastAckType, lastAckOk, lastAppliedValue);
+        queueAck(mp.from, lastAcceptedCommandId, lastAckType, lastAckOk, lastAppliedValue,
+                 lastAppliedLatitudeI, lastAppliedLongitudeI);
         return true;
     }
 
@@ -241,6 +310,8 @@ bool NavameshCommandModule::handleReceivedProtobuf(const meshtastic_MeshPacket &
     }
 
     uint32_t applied = 0;
+    int32_t appliedLatitudeI = 0;
+    int32_t appliedLongitudeI = 0;
     bool ok = true;
 
     switch (cmd->command_type) {
@@ -256,6 +327,13 @@ bool NavameshCommandModule::handleReceivedProtobuf(const meshtastic_MeshPacket &
     case navamesh_NavameshCommandType_QUIET_MODE_EXIT:
         applyQuietModeExit();
         break;
+    case navamesh_NavameshCommandType_SET_LOCATION:
+        ok = applySetLocation(cmd->latitude_i, cmd->longitude_i);
+        if (ok) {
+            appliedLatitudeI = cmd->latitude_i;
+            appliedLongitudeI = cmd->longitude_i;
+        }
+        break;
     default:
         LOG_WARN("NavameshCommand: unknown command_type=%d", (int)cmd->command_type);
         ok = false;
@@ -266,13 +344,15 @@ bool NavameshCommandModule::handleReceivedProtobuf(const meshtastic_MeshPacket &
     lastAckType = cmd->command_type;
     lastAckOk = ok;
     lastAppliedValue = applied;
+    lastAppliedLatitudeI = appliedLatitudeI;
+    lastAppliedLongitudeI = appliedLongitudeI;
 
-    queueAck(mp.from, cmd->command_id, cmd->command_type, ok, applied);
+    queueAck(mp.from, cmd->command_id, cmd->command_type, ok, applied, appliedLatitudeI, appliedLongitudeI);
     return true;
 }
 
 void NavameshCommandModule::queueAck(NodeNum dest, uint32_t commandId, navamesh_NavameshCommandType type,
-                                     bool ok, uint32_t appliedValue)
+                                     bool ok, uint32_t appliedValue, int32_t latitudeI, int32_t longitudeI)
 {
     ackPending = true;
     ackDest = dest;
@@ -280,6 +360,8 @@ void NavameshCommandModule::queueAck(NodeNum dest, uint32_t commandId, navamesh_
     ackType = type;
     ackOk = ok;
     ackAppliedValue = appliedValue;
+    ackAppliedLatitudeI = latitudeI;
+    ackAppliedLongitudeI = longitudeI;
     ackDueMs = millis() + random(NAVAMESH_ACK_JITTER_MIN_MS, NAVAMESH_ACK_JITTER_MAX_MS);
 }
 
@@ -293,6 +375,8 @@ void NavameshCommandModule::sendQueuedAckIfDue(uint32_t now)
     ack.command_type = ackType;
     ack.ok = ackOk;
     ack.applied_value = ackAppliedValue;
+    ack.applied_latitude_i = ackAppliedLatitudeI;
+    ack.applied_longitude_i = ackAppliedLongitudeI;
 
     meshtastic_MeshPacket *p = router->allocForSending();
     if (!p) {

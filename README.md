@@ -184,7 +184,13 @@ Since these nodes don't have a physical GPS module, the position is set from you
 4. The app grabs your phone's current GPS and pushes it to the node
 5. Save
 
-The node will now broadcast that position to the mesh every 15 minutes. To update the position later (e.g. if the node is moved), just repeat step 4.
+The node will now broadcast that position to the mesh every 15 minutes.
+
+**To update the position later, you no longer need Bluetooth.** Once a node is running
+this firmware, the Pi gateway can set its position over LoRa with the `setloc` command —
+in the Navamesh Farm app, *Set node location* takes the phone's own GPS fix and pushes it
+to the node you pick. See [Remote Commands](#remote-commands). The Bluetooth steps above
+are still the way to seed a position on a bench before the node is deployed.
 
 ### Optional: Override Telemetry Interval for Testing
 
@@ -248,6 +254,38 @@ receiving gateway must be provisioned on that channel.
 
 **2. A debug text message** (see below). Useful on a phone, but the protobuf is the
 measurement of record.
+
+## Remote Commands
+
+The Pi gateway can reconfigure a sealed, solar-cased node over LoRa, so routine changes no
+longer need a truck roll or an open case. `NavameshCommandModule` (`src/modules/`) receives
+`navamesh.NavameshCommand` on **PortNum 258** and answers with `navamesh.NavameshAck` on
+**PortNum 259**.
+
+| Command | Argument | Effect |
+|---------|----------|--------|
+| `BLE_WINDOW` | `duration_minutes` | Turn Bluetooth on for N minutes, then off again by itself |
+| `SET_TELEMETRY_INTERVAL` | `interval_seconds` | New reporting cadence, live, no reboot |
+| `QUIET_MODE_ENTER` / `_EXIT` | `duration_minutes` | Stop transmitting; the receiver stays on |
+| `SET_LOCATION` | `latitude_i`, `longitude_i` | Store a fixed position (degrees × 1e7) |
+
+None of these reboot the node. `SET_LOCATION` takes the same path as the Meshtastic app's
+Fixed Position toggle (`AdminModule`'s `set_fixed_position`), so the result is identical to
+setting it over Bluetooth — it just arrives over the mesh instead. The node then broadcasts
+its new position immediately rather than waiting out the 15-minute interval.
+
+Two guards worth knowing:
+
+* **`SET_LOCATION` is unicast-only.** Broadcast to `^all` it would give every node the same
+  coordinates, so the Pi refuses it in two places and the firmware never applies a position
+  it cannot attribute.
+* **0/0 is rejected, and coordinates are never clamped.** A latitude clamped to the valid
+  range is simply a different place; refusing is the only safe failure.
+
+`command_id` is a monotonic replay guard: a node rejects any id not greater than the last
+one it accepted, except an exact repeat, which it re-acknowledges so the Pi's retries still
+get an answer. Trust comes from the `navamesh` channel PSK (or a PKI-encrypted unicast) —
+there is no signature on the payload.
 
 ## Relay Message Format
 

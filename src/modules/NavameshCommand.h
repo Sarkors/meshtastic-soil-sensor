@@ -6,8 +6,8 @@
 
 // Receives navamesh.NavameshCommand on PortNum 258 and acts on it, then acknowledges on
 // PortNum 259. This is what lets the field crew change a sealed, solar-cased node without
-// opening it: open a Bluetooth maintenance window, retune the telemetry interval, or park a
-// node in quiet mode.
+// opening it: open a Bluetooth maintenance window, retune the telemetry interval, park a
+// node in quiet mode, or set the fixed position it reports to the mesh.
 //
 // Why a separate portnum rather than sharing 256 with SoilReading: the portnum filter in
 // SinglePortModule::wantPacket() then does all the message-type discrimination for us. Sharing
@@ -47,9 +47,19 @@ class NavameshCommandModule : public ProtobufModule<navamesh_NavameshCommand>, p
     uint32_t applyQuietModeEnter(uint32_t minutes);
     void applyQuietModeExit();
 
+    /**
+     * Store a fixed position. Returns false without touching anything if the coordinates are
+     * out of range or 0/0, so a node keeps a good position rather than adopting a bad one.
+     *
+     * Unlike the others there is no "value actually applied" to report: coordinates are stored
+     * verbatim or refused, never clamped. A clamped latitude would be a different place.
+     */
+    bool applySetLocation(int32_t latitudeI, int32_t longitudeI);
+
     /// Stage an ack. Deliberately deferred and jittered -- see the implementation.
+    /// latitudeI/longitudeI are echoed for SET_LOCATION and left at 0 by every other command.
     void queueAck(NodeNum dest, uint32_t commandId, navamesh_NavameshCommandType type, bool ok,
-                  uint32_t appliedValue);
+                  uint32_t appliedValue, int32_t latitudeI = 0, int32_t longitudeI = 0);
     void sendQueuedAckIfDue(uint32_t now);
 
     void closeBleWindow();
@@ -76,6 +86,8 @@ class NavameshCommandModule : public ProtobufModule<navamesh_NavameshCommand>, p
     navamesh_NavameshCommandType lastAckType = navamesh_NavameshCommandType_NAVAMESH_COMMAND_UNKNOWN;
     bool lastAckOk = false;
     uint32_t lastAppliedValue = 0;
+    int32_t lastAppliedLatitudeI = 0;
+    int32_t lastAppliedLongitudeI = 0;
 
     /**
      * Single pending ack slot. Control traffic is human-paced, so a queue would be dead weight.
@@ -89,6 +101,8 @@ class NavameshCommandModule : public ProtobufModule<navamesh_NavameshCommand>, p
     navamesh_NavameshCommandType ackType = navamesh_NavameshCommandType_NAVAMESH_COMMAND_UNKNOWN;
     bool ackOk = false;
     uint32_t ackAppliedValue = 0;
+    int32_t ackAppliedLatitudeI = 0;
+    int32_t ackAppliedLongitudeI = 0;
 
     /// Set once the boot-time maintenance window has been armed by the first runOnce().
     bool bootWindowArmed = false;
