@@ -9,10 +9,22 @@ Cross-repo context — how a command travels from the phone to here and back —
 
 Branch: **`raw-adc-private-app`**.
 
-## Push to `myfork`, never `origin`
+## Push to the metadavi fork, not the Sarkors upstream
 
-`origin` is `Sarkors/meshtastic-soil-sensor` and is **read-only for us** — a push there
-403s. Ours is `myfork` (`metadavi/meshtastic-soil-sensor`).
+Ours is **`metadavi/meshtastic-soil-sensor`**. `Sarkors/meshtastic-soil-sensor` is the
+upstream we forked and is **read-only for us** — a push there 403s.
+
+**Check the URL, not the remote name.** Remote names are local configuration and differ
+per machine: one clone has both, with `myfork` = metadavi and `origin` = Sarkors; another
+has only `origin` = metadavi, where pushing to `origin` is correct. A rule phrased as
+"never push to origin" is wrong on the second machine.
+
+```bash
+git remote -v                       # confirm which name points at metadavi
+git rev-parse --abbrev-ref @{u}     # what this branch already tracks
+```
+
+If the branch tracks the metadavi fork, plain `git pull` / `git push` is right.
 
 ## What we added
 
