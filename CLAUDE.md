@@ -136,7 +136,38 @@ the Pi's `TODO.md` — position persisted but old coordinates still broadcast �
 need reproducing on a second node.
 
 **`SET_LOCATION` must never be broadcast.** Every node would claim the same spot; the Pi
-enforces this and the proto says so.
+enforces this and the proto says so. The consequence worth knowing: it is the one command
+with **no broadcast fallback**, so it inherits the reliability of unicast. On the bench,
+unicast to a node that had just rebooted several times timed out repeatedly while
+`^all` broadcasts to the same node were applied first time (`meshtastic`'s own CLI warns
+"Nodes out of direct gateway range cannot be reached by unicast; try ^all"). Not a firmware
+fault, but a `setloc` timeout means *unknown*, not *failed* -- retry, and trust the ack when
+it arrives rather than assuming the write did not happen.
+
+## Verified on the bench, 2026-08-23
+
+**The legacy → new migration preserves config.** This was the open worry: `loadFromDisk()`
+discards a saved `channelFile` whose version is below `DEVICESTATE_MIN_VER`, and
+`installDefaultChannels()` does `memset(&channelFile, 0, ...)` -- which would silently wipe
+the `navamesh` secondary at index 1 and its PSK, leaving a node that looks healthy and is
+deaf to every command.
+
+Tested rather than argued: a node was flashed to `efb7db11d` (the last percentage-text
+commit, matching what the field nodes run), confirmed to hold `role: SENSOR` and `navamesh`
+as SECONDARY at index 1, then flashed forward to the deployment build. Both survived intact,
+`deviceStateVersion` 24 throughout. Consistent with the source: every legacy-era commit here
+already carries `DEVICESTATE_CUR_VER 24`, so the discard branch cannot fire.
+
+**The ack readback's disagreement branch is proven, not just compiled.** A genuinely
+corrupted nodeDB cannot be conjured, so a throwaway build stored `latitudeI + 1000`. A
+`setloc` to 26.291000 came back `ok=False` carrying `applied_lat 26.2911`, and a serial read
+confirmed the node really held `262911000` -- the ack reported what was stored, not what was
+asked. Reverting and reflashing returned `ok=True` with `262865000` exactly.
+
+To repeat it: offset `pos.latitude_i` in `applySetLocation()` before the nodeDB write, build,
+flash, send a `setloc`, then `git checkout` the file and reflash. The instrumented build
+carries the **same version string** as the real one, since a dirty tree does not change the
+git hash -- keep the artifact out of `dist/` and delete it afterwards.
 
 ## Conventions
 
