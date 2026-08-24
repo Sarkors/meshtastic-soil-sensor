@@ -67,10 +67,27 @@ cost a long debugging session here: `459b09e` predates `SET_LOCATION`, `a36db94`
 and a node flashed with the wrong one returns `ok=False` in a way indistinguishable from a
 value being rejected.
 
-**Flash is at 91.8%** (748,032 of 815,104 bytes), ~65 KB headroom. Worth checking after any
-addition.
+**Flash is at 91.8%** (748,464 of 815,104 bytes as of `cff0bd52f`, ~65 KB headroom).
+Worth checking after any addition.
 
 ## Things that will bite
+
+**Flashing does not set the role. Nothing about a DFU flash provisions a node.**
+The role lives in the saved config in LittleFS, which a `.uf2`/`.zip` flash does not
+erase, so a node keeps whatever role it had — silently. `DEVICESTATE_CUR_VER` and
+`DEVICESTATE_MIN_VER` are both `24` and this fork has never touched them, so no flash
+between `459b09e`, `a36db94` and HEAD discards a saved config either.
+
+The `SENSOR` default at `NodeDB.cpp:588` (ours; upstream defaults to `CLIENT`) only
+applies where there is **no valid config to load** — i.e. `factoryReset()`, or a first
+boot on erased prefs. `factoryReset()` then calls `installRoleDefaults()`, so a reset on
+this firmware yields a fully provisioned SENSOR. It has since `37274b4e7`, an ancestor of
+every current build, so a factory reset here cannot produce CLIENT.
+
+The likely history of a CLIENT node is therefore that it once ran **stock Meshtastic**
+(where CLIENT is the default) and our firmware was flashed over the top. That also means
+flashing alone will not clear `is_power_saving` on a node parked in deep sleep: only a
+factory reset or an explicit role change re-applies the defaults.
 
 **Role defaults are applied on role change, not just at factory reset.**
 `AdminModule.cpp` calls `installRoleDefaults()` when the role differs, so setting `SENSOR`
@@ -83,12 +100,36 @@ when environment telemetry is disabled, so `AnalogSoilSensor` is never registere
 **must be rebooted** before it reports anything. A node left in `CLIENT` acks commands and
 broadcasts NodeInfo while never sending a reading — it looks perfectly healthy.
 
-**The ack echoes the request, not a read-back.** `handleReceivedProtobuf()` sets
-`appliedLatitudeI = cmd->latitude_i` after a successful apply, so the ack cannot disagree
-with what was asked. A write that reports success but does not persist is undetectable
-from the app — we hit exactly that on a node whose nodeDB was corrupted, which acked
-`ok=True` while continuing to broadcast a position 2 km away. A factory reset fixed it.
-Reading the stored position back before echoing would make this visible.
+**SENSOR with environment telemetry off is now self-repaired at boot** (`cff0bd52f`).
+`loadFromDisk()` defaults `config` and `moduleConfig` **independently** and neither path
+calls `installRoleDefaults()` — only `factoryReset()` does — while
+`environment_measurement_enabled = true` is set in exactly one place in the file
+(`installRoleDefaults`, SENSOR branch). So a corrupt or unreadable `moduleConfig` beside a
+healthy config landed a node at role=SENSOR with the probe never registered: a node that
+passes a role check and still reports nothing, which is worse than the CLIENT case. It is
+reachable without a version bump — any `loadProto` failure does it. `loadFromDisk()` now
+detects the pair, re-applies the role defaults and logs at warn level. Costs a stale
+telemetry interval at worst, against a node that would otherwise stay silent until
+someone opens its case.
+
+**The ack used to echo the request rather than a read-back.** Fixed in `cff0bd52f`.
+`handleReceivedProtobuf()` set `appliedLatitudeI = cmd->latitude_i`, so the ack could not
+disagree with what was asked and a write that reported success without persisting was
+undetectable from the app — we hit exactly that on a node whose nodeDB was corrupted,
+which acked `ok=True` while continuing to broadcast a position 2 km away. A factory reset
+fixed it.
+
+`applySetLocation()` now re-fetches the node after writing and reports the stored
+coordinates through out-params; a disagreement fails the ack while still carrying what is
+actually stored, so the operator sees the node's answer instead of their own input. The
+node is re-fetched deliberately rather than reusing the pointer just written through,
+since a lookup returning the wrong entry or none is one of the failures worth catching.
+A mismatch is **reported, not repaired** — retrying a write that just silently disagreed
+would only produce the same ack again.
+
+Note this catches a *storage* divergence, not a *broadcast* one. The `!0b9aed49` case in
+the Pi's `TODO.md` — position persisted but old coordinates still broadcast — would still
+need reproducing on a second node.
 
 **`SET_LOCATION` must never be broadcast.** Every node would claim the same spot; the Pi
 enforces this and the proto says so.
