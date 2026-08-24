@@ -153,6 +153,31 @@ unicast loss as a mesh problem; nodes spread across a farm are the normal case.
 The operational rule that follows: a `setloc` timeout means *unknown*, not *failed*. Retry,
 and confirm with `position` or `map <id>` rather than inferring from a missing ack.
 
+## Planned next (2026-08-24): report the firmware version to the Pi
+
+Being built on the Mac, and it has a **hard ordering constraint: it must land before a
+fleet flash, not after.** Nothing about it can be done Pi-side later.
+
+Why: `meshtastic_User`, which is what NodeInfo carries, has no version field at all. Only
+`DeviceMetadata` has `firmware_version[18]`, and it is produced in exactly two places —
+`PhoneAPI.cpp:300`, the *local* serial/BLE link, and `AdminModule.cpp:1234`, in reply to an
+admin-channel `get_device_metadata_request` that needs the session handshake and
+`admin_channel_enabled` (false by default). **A remote node never broadcasts its version over
+LoRa.** Neither do our protos: `SoilReading` is `raw_adc`, `battery_percent`, `battery_mv`.
+
+So it needs a field on the wire. **Put it in `NavameshAck`, not `SoilReading`:** a version on
+every reading costs airtime forever, whereas acks are already sent and any command elicits
+one — which also makes "which nodes still need updating" something the Pi can poll rather
+than wait for. A 4-byte git hash beats the 18-char string if airtime is tight. Adding a field
+to either is protobuf-compatible with deployed nodes, but remember the `.proto` is duplicated
+**byte-identically** in the Navamesh repo and must be regenerated in both.
+
+What is already answerable without any of this: whether a node has been flashed *at all*.
+Legacy sends a percentage as text, this firmware sends `SoilReading` with raw ADC, and the Pi
+populates `soil_raw` only from that path — so `soil_raw` NULL means not yet flashed. That
+covers a legacy → new rollout; it cannot distinguish one new build from another, which is
+what the rollout *after* this one needs.
+
 ## Verified on the bench, 2026-08-23
 
 **The legacy → new migration preserves config.** This was the open worry: `loadFromDisk()`
