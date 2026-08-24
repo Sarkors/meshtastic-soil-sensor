@@ -78,11 +78,15 @@ erase, so a node keeps whatever role it had — silently. `DEVICESTATE_CUR_VER` 
 `DEVICESTATE_MIN_VER` are both `24` and this fork has never touched them, so no flash
 between `459b09e`, `a36db94` and HEAD discards a saved config either.
 
-The `SENSOR` default at `NodeDB.cpp:588` (ours; upstream defaults to `CLIENT`) only
-applies where there is **no valid config to load** — i.e. `factoryReset()`, or a first
-boot on erased prefs. `factoryReset()` then calls `installRoleDefaults()`, so a reset on
-this firmware yields a fully provisioned SENSOR. It has since `37274b4e7`, an ancestor of
-every current build, so a factory reset here cannot produce CLIENT.
+The `SENSOR` default at `NodeDB.cpp:588` only applies where there is **no valid config to
+load** — i.e. `factoryReset()`, or a first boot on erased prefs. `factoryReset()` then
+calls `installRoleDefaults()`, so a reset on this firmware yields a fully provisioned
+SENSOR. It has since `37274b4e7`, an ancestor of every current build, so a factory reset
+here cannot produce CLIENT.
+
+**That default is Sarkors', not ours** — `37274b4e7` is in `upstream/develop`, so nodes
+first flashed with Sarkors firmware also came up SENSOR. Stock Meshtastic is what defaults
+to `CLIENT`; do not read "upstream" here as Sarkors.
 
 The likely history of a CLIENT node is therefore that it once ran **stock Meshtastic**
 (where CLIENT is the default) and our firmware was flashed over the top. That also means
