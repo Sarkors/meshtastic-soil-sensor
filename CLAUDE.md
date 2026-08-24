@@ -165,12 +165,34 @@ admin-channel `get_device_metadata_request` that needs the session handshake and
 `admin_channel_enabled` (false by default). **A remote node never broadcasts its version over
 LoRa.** Neither do our protos: `SoilReading` is `raw_adc`, `battery_percent`, `battery_mv`.
 
-So it needs a field on the wire. **Put it in `NavameshAck`, not `SoilReading`:** a version on
-every reading costs airtime forever, whereas acks are already sent and any command elicits
-one — which also makes "which nodes still need updating" something the Pi can poll rather
-than wait for. A 4-byte git hash beats the 18-char string if airtime is tight. Adding a field
-to either is protobuf-compatible with deployed nodes, but remember the `.proto` is duplicated
-**byte-identically** in the Navamesh repo and must be regenerated in both.
+So it needs a field on the wire. **This is an operator observation, not a farmer feature.**
+The audience is whoever is running a rollout; a farmer needs DRY/DAMP/WET and has no use for
+a build hash. Putting it behind a button in the app would re-introduce exactly the
+protocol-facing surface that cd60737 and the `HELP_TEXT` rewrite took out. The Pi records it
+passively; the operator reads it.
+
+**Announce it at boot, unsolicited.** A firmware version changes only on a reflash, and a
+reflash always reboots — so one announcement per boot is exactly as fresh as this value can
+ever need to be, and costs a single packet rather than bytes on every reading. The pattern
+already exists: `queueAck(NODENUM_BROADCAST, 0, ...)` with `command_id 0` marks an
+unsolicited ack, which is how quiet-mode self-expiry reports itself.
+
+**Add a random jitter before that announcement.** A fleet power-cycle reboots 18 nodes at
+once, and 18 simultaneous broadcasts collide — which is not hypothetical, collisions are what
+made the dev bench drop acks (see below).
+
+**Carry it in `NavameshAck` too, as an opportunistic refresh.** Free, since acks are already
+sent, and it covers the case where the Pi was down at boot and missed the announcement.
+
+An earlier version of this note argued for the ack *instead* of `SoilReading` on airtime
+grounds. That argument was overstated: at the SENSOR default of 8 hours a node transmits
+three times a day, so a 4-byte hash plus protobuf overhead is negligible against the packet's
+fixed cost. Airtime only decides this at a shortened interval. What actually decides it is
+that the value changes on reboot, so reboot is when to send it.
+
+A 4-byte git hash beats the 18-char string. Adding a field is protobuf-compatible with
+deployed nodes, but the `.proto` is duplicated **byte-identically** in the Navamesh repo and
+must be regenerated in both.
 
 What is already answerable without any of this: whether a node has been flashed *at all*.
 Legacy sends a percentage as text, this firmware sends `SoilReading` with raw ADC, and the Pi
