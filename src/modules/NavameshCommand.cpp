@@ -192,7 +192,8 @@ uint32_t NavameshCommandModule::applyQuietModeEnter(uint32_t minutes)
     return clamped;
 }
 
-bool NavameshCommandModule::applySetLocation(int32_t latitudeI, int32_t longitudeI)
+bool NavameshCommandModule::applySetLocation(int32_t latitudeI, int32_t longitudeI,
+                                             int32_t *storedLatitudeI, int32_t *storedLongitudeI)
 {
     if (latitudeI < -NAVAMESH_LATITUDE_I_LIMIT || latitudeI > NAVAMESH_LATITUDE_I_LIMIT ||
         longitudeI < -NAVAMESH_LONGITUDE_I_LIMIT || longitudeI > NAVAMESH_LONGITUDE_I_LIMIT) {
@@ -247,7 +248,41 @@ bool NavameshCommandModule::applySetLocation(int32_t latitudeI, int32_t longitud
         positionModule->sendOurPosition();
 #endif
 
-    LOG_INFO("NavameshCommand: fixed position = %d, %d (live, no reboot)", (int)latitudeI, (int)longitudeI);
+    // Read the position back out of the nodeDB rather than echoing the request.
+    //
+    // The ack used to report whatever was asked for, so it could not disagree with the
+    // command -- which makes a write that succeeds and does not persist completely
+    // undetectable from the app. That is not hypothetical: a node whose nodeDB had been
+    // corrupted acked ok=True and went on broadcasting a position 2 km away, and only a
+    // factory reset fixed it. An ack that echoes its own input can only ever confirm
+    // that the packet arrived.
+    //
+    // Re-fetching the node is deliberate: reusing the `node` pointer from above would
+    // re-read the same struct this function just wrote, and a lookup that returns the
+    // wrong entry -- or none -- is exactly one of the failures worth catching.
+    meshtastic_NodeInfoLite *readback = nodeDB->getMeshNode(nodeDB->getNodeNum());
+    if (!readback || !readback->has_position) {
+        LOG_ERROR("NavameshCommand: position did not persist (no position after write)");
+        return false;
+    }
+    if (storedLatitudeI)
+        *storedLatitudeI = readback->position.latitude_i;
+    if (storedLongitudeI)
+        *storedLongitudeI = readback->position.longitude_i;
+
+    // Reported, not repaired. A mismatch here means the nodeDB is not storing what it is
+    // told, and the honest thing is to fail the ack and let the coordinates in it show
+    // the operator what the node actually holds -- retrying a write that just silently
+    // disagreed would only produce the same ack again.
+    if (readback->position.latitude_i != latitudeI || readback->position.longitude_i != longitudeI) {
+        LOG_ERROR("NavameshCommand: position readback disagrees: asked %d,%d stored %d,%d",
+                  (int)latitudeI, (int)longitudeI,
+                  (int)readback->position.latitude_i, (int)readback->position.longitude_i);
+        return false;
+    }
+
+    LOG_INFO("NavameshCommand: fixed position = %d, %d (live, no reboot, readback ok)",
+             (int)latitudeI, (int)longitudeI);
     return true;
 }
 
@@ -328,11 +363,11 @@ bool NavameshCommandModule::handleReceivedProtobuf(const meshtastic_MeshPacket &
         applyQuietModeExit();
         break;
     case navamesh_NavameshCommandType_SET_LOCATION:
-        ok = applySetLocation(cmd->latitude_i, cmd->longitude_i);
-        if (ok) {
-            appliedLatitudeI = cmd->latitude_i;
-            appliedLongitudeI = cmd->longitude_i;
-        }
+        // The applied coordinates come back from the nodeDB, not from the request, so
+        // the ack reports what the node holds rather than what it was told. On failure
+        // they carry whatever was actually stored, which is what makes a disagreement
+        // visible from the app instead of looking like a rejected value.
+        ok = applySetLocation(cmd->latitude_i, cmd->longitude_i, &appliedLatitudeI, &appliedLongitudeI);
         break;
     default:
         LOG_WARN("NavameshCommand: unknown command_type=%d", (int)cmd->command_type);

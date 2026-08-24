@@ -1426,6 +1426,33 @@ void NodeDB::loadFromDisk()
 
         saveToDisk(SEGMENT_MODULECONFIG);
     }
+
+    // A SENSOR node with environment telemetry switched off is the one broken state
+    // that looks completely healthy from the gateway: it acks commands, broadcasts
+    // NodeInfo, holds a good link, reports the right role -- and never sends a soil
+    // reading, because EnvironmentTelemetry returns early at init when environment
+    // measurement is disabled and so never registers AnalogSoilSensor.
+    //
+    // It is reachable without anyone doing anything wrong. config and moduleConfig are
+    // loaded and defaulted independently above, and neither default path calls
+    // installRoleDefaults() -- only factoryReset() does. So a corrupt or unreadable
+    // moduleConfig leaves role=SENSOR from a healthy config with environment
+    // measurement back at its proto default of false, and a discarded config defaults
+    // role to SENSOR while a CLIENT-era moduleConfig survives with it still false.
+    // environment_measurement_enabled is set in exactly one place in this file
+    // (installRoleDefaults, SENSOR branch), which is why nothing else restores it.
+    //
+    // For a SENSOR node this combination is never a deliberate configuration: the role
+    // exists to report the probe. So repair it rather than reporting it -- re-applying
+    // the role defaults costs a stale telemetry interval at worst, against a node that
+    // otherwise stays silent in the field until someone opens its case. Loudly, because
+    // a silent self-repair would hide however it got here.
+    if (config.device.role == meshtastic_Config_DeviceConfig_Role_SENSOR &&
+        !moduleConfig.telemetry.environment_measurement_enabled) {
+        LOG_WARN("SENSOR role with environment telemetry disabled -- reapplying role defaults");
+        installRoleDefaults(meshtastic_Config_DeviceConfig_Role_SENSOR);
+        saveToDisk(SEGMENT_CONFIG | SEGMENT_MODULECONFIG);
+    }
 #if ARCH_PORTDUINO
     // set any config overrides
     if (portduino_config.has_configDisplayMode) {

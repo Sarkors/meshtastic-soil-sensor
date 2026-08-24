@@ -54,7 +54,11 @@ class NavameshCommandModule : public ProtobufModule<navamesh_NavameshCommand>, p
      * Unlike the others there is no "value actually applied" to report: coordinates are stored
      * verbatim or refused, never clamped. A clamped latitude would be a different place.
      */
-    bool applySetLocation(int32_t latitudeI, int32_t longitudeI);
+    // storedLatitudeI/storedLongitudeI receive the position read back out of the
+    // nodeDB after the write, so the ack can report what the node holds rather than
+    // echoing the request it cannot disagree with. Both may be null.
+    bool applySetLocation(int32_t latitudeI, int32_t longitudeI,
+                          int32_t *storedLatitudeI = nullptr, int32_t *storedLongitudeI = nullptr);
 
     /// Stage an ack. Deliberately deferred and jittered -- see the implementation.
     /// latitudeI/longitudeI are echoed for SET_LOCATION and left at 0 by every other command.
