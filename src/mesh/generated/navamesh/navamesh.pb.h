@@ -41,7 +41,22 @@ typedef enum _navamesh_NavameshCommandType {
  over LoRa instead. Applied with NO reboot and persisted.
 
  Never send this to NODENUM_BROADCAST: every node would claim the same spot. */
-    navamesh_NavameshCommandType_SET_LOCATION = 5
+    navamesh_NavameshCommandType_SET_LOCATION = 5,
+    /* Report the node's firmware version and change nothing.
+
+ Every other command in this enum mutates the node, which made "what build is
+ this node running?" unanswerable without altering it -- and the version is
+ exactly what you want *before* deciding whether to alter it. This is the one
+ safe probe: it applies nothing, and the ack it elicits carries
+ firmware_version like any other.
+
+ A node also sends this UNSOLICITED once at boot (command_id = 0), so a node
+ that has just been flashed reports its new build without being asked. That
+ is what makes a partially-updated fleet a query rather than a guess.
+
+ Safe to broadcast: the reply is the only effect. Expect one ack per node in
+ radio range, which is why the firmware jitters them. */
+    navamesh_NavameshCommandType_GET_FIRMWARE_INFO = 6
 } navamesh_NavameshCommandType;
 
 /* Struct definitions */
@@ -146,6 +161,24 @@ typedef struct _navamesh_NavameshAck {
  yields when its acks are decoded by a newer Pi. */
     int32_t applied_latitude_i;
     int32_t applied_longitude_i;
+    /* The node's firmware version, e.g. "2.7.20.200289a" -- Meshtastic's APP_VERSION,
+ the same string the app and a serial console show, with the git short hash on
+ the end.
+
+ Carried on EVERY ack, not just GET_FIRMWARE_INFO ones, because the question it
+ answers is usually asked about a command that already went wrong: an ok=False
+ from a node running a build that predates the handler is indistinguishable from
+ a value the handler rejected. Two diagnoses on 2026-08-21 were lost to exactly
+ that. Answering it in the same packet costs no extra transmission.
+
+ Deliberately the string rather than a 4-byte hash. Acks are only sent in reply
+ to a command, so the airtime is bounded by operator traffic rather than by the
+ reporting interval -- and the string is directly comparable to what the
+ Meshtastic app shows and to the .zip filename that was flashed, which a hash
+ would need a lookup table to match.
+
+ Empty from a node running a build older than this field. */
+    char firmware_version[20];
 } navamesh_NavameshAck;
 
 
@@ -155,8 +188,8 @@ extern "C" {
 
 /* Helper constants for enums */
 #define _navamesh_NavameshCommandType_MIN navamesh_NavameshCommandType_NAVAMESH_COMMAND_UNKNOWN
-#define _navamesh_NavameshCommandType_MAX navamesh_NavameshCommandType_SET_LOCATION
-#define _navamesh_NavameshCommandType_ARRAYSIZE ((navamesh_NavameshCommandType)(navamesh_NavameshCommandType_SET_LOCATION+1))
+#define _navamesh_NavameshCommandType_MAX navamesh_NavameshCommandType_GET_FIRMWARE_INFO
+#define _navamesh_NavameshCommandType_ARRAYSIZE ((navamesh_NavameshCommandType)(navamesh_NavameshCommandType_GET_FIRMWARE_INFO+1))
 
 
 #define navamesh_NavameshCommand_command_type_ENUMTYPE navamesh_NavameshCommandType
@@ -167,10 +200,10 @@ extern "C" {
 /* Initializer values for message structs */
 #define navamesh_SoilReading_init_default        {0, 0, 0, 0}
 #define navamesh_NavameshCommand_init_default    {_navamesh_NavameshCommandType_MIN, 0, 0, 0, 0, 0}
-#define navamesh_NavameshAck_init_default        {0, _navamesh_NavameshCommandType_MIN, 0, 0, 0, 0}
+#define navamesh_NavameshAck_init_default        {0, _navamesh_NavameshCommandType_MIN, 0, 0, 0, 0, ""}
 #define navamesh_SoilReading_init_zero           {0, 0, 0, 0}
 #define navamesh_NavameshCommand_init_zero       {_navamesh_NavameshCommandType_MIN, 0, 0, 0, 0, 0}
-#define navamesh_NavameshAck_init_zero           {0, _navamesh_NavameshCommandType_MIN, 0, 0, 0, 0}
+#define navamesh_NavameshAck_init_zero           {0, _navamesh_NavameshCommandType_MIN, 0, 0, 0, 0, ""}
 
 /* Field tags (for use in manual encoding/decoding) */
 #define navamesh_SoilReading_raw_adc_tag         1
@@ -189,6 +222,7 @@ extern "C" {
 #define navamesh_NavameshAck_applied_value_tag   4
 #define navamesh_NavameshAck_applied_latitude_i_tag 5
 #define navamesh_NavameshAck_applied_longitude_i_tag 6
+#define navamesh_NavameshAck_firmware_version_tag 7
 
 /* Struct field encoding specification for nanopb */
 #define navamesh_SoilReading_FIELDLIST(X, a) \
@@ -215,7 +249,8 @@ X(a, STATIC,   SINGULAR, UENUM,    command_type,      2) \
 X(a, STATIC,   SINGULAR, BOOL,     ok,                3) \
 X(a, STATIC,   SINGULAR, UINT32,   applied_value,     4) \
 X(a, STATIC,   SINGULAR, SFIXED32, applied_latitude_i,   5) \
-X(a, STATIC,   SINGULAR, SFIXED32, applied_longitude_i,   6)
+X(a, STATIC,   SINGULAR, SFIXED32, applied_longitude_i,   6) \
+X(a, STATIC,   SINGULAR, STRING,   firmware_version,   7)
 #define navamesh_NavameshAck_CALLBACK NULL
 #define navamesh_NavameshAck_DEFAULT NULL
 
@@ -229,8 +264,8 @@ extern const pb_msgdesc_t navamesh_NavameshAck_msg;
 #define navamesh_NavameshAck_fields &navamesh_NavameshAck_msg
 
 /* Maximum encoded size of messages (where known) */
-#define NAVAMESH_NAVAMESH_NAVAMESH_PB_H_MAX_SIZE navamesh_NavameshCommand_size
-#define navamesh_NavameshAck_size                26
+#define NAVAMESH_NAVAMESH_NAVAMESH_PB_H_MAX_SIZE navamesh_NavameshAck_size
+#define navamesh_NavameshAck_size                47
 #define navamesh_NavameshCommand_size            30
 #define navamesh_SoilReading_size                24
 

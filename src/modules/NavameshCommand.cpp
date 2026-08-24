@@ -65,6 +65,18 @@ bool NavameshCommandModule::quietModeActive = false;
 #define NAVAMESH_ACK_JITTER_MIN_MS 200
 #define NAVAMESH_ACK_JITTER_MAX_MS 4000
 
+// The boot firmware announce is jittered far wider than a command ack, for a different reason.
+// A broadcast command is one operator action and the 4 s span above is enough to decorrelate the
+// replies. A boot announce fires from every node that just came up -- and the case that matters
+// is grid power returning to the whole farm, or a fleet flash, where all 18 boot within seconds
+// of each other with no operator pacing them. 30 s spreads that thin enough to survive.
+//
+// The floor is not zero: it also holds the announce back until the mesh is actually up. runOnce()
+// starts ticking before the radio has settled, and an announce sent into that window is simply
+// lost -- it is a once-per-boot packet with no retry, so the cheapest fix is to not be early.
+#define NAVAMESH_BOOT_ANNOUNCE_MIN_MS 5000
+#define NAVAMESH_BOOT_ANNOUNCE_MAX_MS 35000
+
 NavameshCommandModule::NavameshCommandModule()
     : ProtobufModule("NavameshCommand", NAVAMESH_COMMAND_PORTNUM, &navamesh_NavameshCommand_msg),
       OSThread("NavameshCommand")
@@ -362,6 +374,12 @@ bool NavameshCommandModule::handleReceivedProtobuf(const meshtastic_MeshPacket &
     case navamesh_NavameshCommandType_QUIET_MODE_EXIT:
         applyQuietModeExit();
         break;
+    case navamesh_NavameshCommandType_GET_FIRMWARE_INFO:
+        // Deliberately does nothing. The ack is the entire response, and every ack already
+        // carries firmware_version -- so the handler's job is only to not fail, which lets the
+        // Pi ask "what are you running?" without altering the node it is asking about.
+        LOG_INFO("NavameshCommand: firmware info requested (%s)", optstr(APP_VERSION));
+        break;
     case navamesh_NavameshCommandType_SET_LOCATION:
         // The applied coordinates come back from the nodeDB, not from the request, so
         // the ack reports what the node holds rather than what it was told. On failure
@@ -412,6 +430,15 @@ void NavameshCommandModule::sendQueuedAckIfDue(uint32_t now)
     ack.applied_value = ackAppliedValue;
     ack.applied_latitude_i = ackAppliedLatitudeI;
     ack.applied_longitude_i = ackAppliedLongitudeI;
+
+    // On every ack, not only GET_FIRMWARE_INFO ones. The version is most wanted about a command
+    // that just failed -- an ok=False from a node too old to have the handler looks exactly like
+    // a value the handler rejected -- and answering in the same packet costs no transmission.
+    //
+    // strncpy with sizeof-1 against an init_zero struct leaves the NUL in place. APP_VERSION is
+    // 14 chars against a 20-byte field, so this cannot truncate today; the bound is there for the
+    // build after the one that makes it longer.
+    strncpy(ack.firmware_version, optstr(APP_VERSION), sizeof(ack.firmware_version) - 1);
 
     meshtastic_MeshPacket *p = router->allocForSending();
     if (!p) {
@@ -472,6 +499,23 @@ int32_t NavameshCommandModule::runOnce()
     if (!bootWindowArmed) {
         bootWindowArmed = true;
         applyBleWindow(NAVAMESH_BOOT_BLE_WINDOW_MINUTES);
+
+        // Say what we are running, unsolicited, exactly once per boot. command_id 0 marks it the
+        // same way a self-expired quiet mode does: nobody asked, so the Pi must treat it as a
+        // state notification rather than correlate it to a pending request.
+        //
+        // This is what makes a fleet flash observable while it happens. A node reboots as the
+        // last step of a DFU, so its new version reaches the gateway within the announce window
+        // without anyone sending it anything -- "which nodes still need flashing" stops being a
+        // clipboard exercise. Cheap enough to be unconditional: one small broadcast per boot,
+        // against nodes whose normal cadence is a reading every 8 hours.
+        //
+        // Overwriting the single ack slot is safe here. If a command arrives before this fires,
+        // its own ack replaces the announce -- and carries the same firmware_version anyway, so
+        // the Pi still learns the version and the announce had nothing left to add.
+        queueAck(NODENUM_BROADCAST, 0, navamesh_NavameshCommandType_GET_FIRMWARE_INFO, true, 0);
+        ackDueMs = millis() + random(NAVAMESH_BOOT_ANNOUNCE_MIN_MS, NAVAMESH_BOOT_ANNOUNCE_MAX_MS);
+        LOG_INFO("NavameshCommand: boot announce queued (%s)", optstr(APP_VERSION));
     }
 
     if (bleWindowEndMs != 0 && (int32_t)(now - bleWindowEndMs) >= 0)

@@ -35,6 +35,7 @@ If the branch tracks the metadavi fork, plain `git pull` / `git push` is right.
 | `src/modules/NavameshCommand.{h,cpp}` | receives commands, applies them, acks |
 | `src/modules/Telemetry/Sensor/AnalogSoilSensor.{h,cpp}` | reads the probe |
 | `src/modules/TelemetryRelay.{h,cpp}` | sends the SoilReading |
+| `proto/navamesh/navamesh.options` | nanopb field sizing; firmware-side only, NOT copied to the Pi |
 | `bin/regen-navamesh-proto.sh` | regenerates the pb files (needs nanopb 0.4.9.1) |
 
 The generated protobufs are committed deliberately, so a plain `pio run` needs no nanopb
@@ -153,65 +154,68 @@ unicast loss as a mesh problem; nodes spread across a farm are the normal case.
 The operational rule that follows: a `setloc` timeout means *unknown*, not *failed*. Retry,
 and confirm with `position` or `map <id>` rather than inferring from a missing ack.
 
-## Planned next (2026-08-24): report the firmware version to the Pi
+## Reporting the firmware version (built 2026-08-24)
 
-Being built on the Mac, and it has a **hard ordering constraint: it must land before a
-fleet flash, not after.** Nothing about it can be done Pi-side later.
+Every node says what build it runs, because nothing else in the system could: `meshtastic_User`
+(what NodeInfo carries) has no version field, and `DeviceMetadata.firmware_version` is produced
+only at `PhoneAPI.cpp:300` (local serial/BLE) and `AdminModule.cpp:1234` (admin-channel request,
+needs the session handshake and `admin_channel_enabled`). A remote node never broadcasts it.
 
-Why: `meshtastic_User`, which is what NodeInfo carries, has no version field at all. Only
-`DeviceMetadata` has `firmware_version[18]`, and it is produced in exactly two places —
-`PhoneAPI.cpp:300`, the *local* serial/BLE link, and `AdminModule.cpp:1234`, in reply to an
-admin-channel `get_device_metadata_request` that needs the session handshake and
-`admin_channel_enabled` (false by default). **A remote node never broadcasts its version over
-LoRa.** Neither do our protos: `SoilReading` is `raw_adc`, `battery_percent`, `battery_mv`.
+Three carriers, in order of how the Pi usually learns it:
 
-So it needs a field on the wire. **This is an operator observation, not a farmer feature.**
-The audience is whoever is running a rollout; a farmer needs DRY/DAMP/WET and has no use for
-a build hash. Putting it behind a button in the app would re-introduce exactly the
-protocol-facing surface that cd60737 and the `HELP_TEXT` rewrite took out. The Pi records it
-passively; the operator reads it.
+1. **A boot announce, unsolicited.** `runOnce()`'s first tick queues
+   `queueAck(NODENUM_BROADCAST, 0, GET_FIRMWARE_INFO, ...)` — `command_id 0` marks it
+   unsolicited, the same marker quiet-mode self-expiry uses. A reflash always reboots, so this
+   is exactly as fresh as the value can ever be, for one packet. **Jittered 5-35 s**
+   (`NAVAMESH_BOOT_ANNOUNCE_*`), far wider than the 4 s ack jitter, because the case that
+   matters is a fleet power-cycle or a rollout booting 18 nodes at once with no operator pacing
+   them. The floor is not zero: it also holds the announce back until the radio has settled,
+   since this is a once-per-boot packet with no retry.
+2. **Every ack — load-bearing, not opportunistic.** See below: the announce is unrepeated, so
+   this is what recovers a node the Pi missed. Free, since acks are already sent, and it also
+   covers the case that started this: an `ok=False` from a node whose build predates a handler
+   is indistinguishable from a value the handler rejected, which cost two diagnoses on
+   2026-08-21.
+3. **`GET_FIRMWARE_INFO` (type 6), on request.** Applies nothing; the ack is the whole response.
+   The one safe probe — every other command mutates the node you are asking about. Safe to
+   broadcast. Rarely needed, given (1).
 
-**Announce it at boot, unsolicited.** A firmware version changes only on a reflash, and a
-reflash always reboots — so one announcement per boot is exactly as fresh as this value can
-ever need to be, and costs a single packet rather than bytes on every reading. The pattern
-already exists: `queueAck(NODENUM_BROADCAST, 0, ...)` with `command_id 0` marks an
-unsolicited ack, which is how quiet-mode self-expiry reports itself.
+**It carries the full version string, not a 4-byte hash** — `char firmware_version[20]`, sized
+by `proto/navamesh/navamesh.options` (nanopb emits a `pb_callback_t` without it). Decided
+2026-08-24 against an earlier note preferring the hash: that note's own airtime argument was
+withdrawn in the same commit that made it ("negligible against the packet's fixed cost"), and
+the ~11 bytes it saves buy nothing on a packet sent once per reboot. What the string buys is
+that it is byte-identical to what the Meshtastic app shows, what serial prints, and the `.zip`
+filename that was flashed — no conversion between the thing you flashed and the thing you are
+reading. It also keeps `2.7.20`, which a bare git hash drops and which changes on an upstream
+rebase.
 
-**Add a random jitter before that announcement.** A fleet power-cycle reboots 18 nodes at
-once, and 18 simultaneous broadcasts collide — which is not hypothetical, collisions are what
-made the dev bench drop acks (see below).
+**It is an operator observation, not a farmer feature.** Nothing about it reaches the app: no
+button, and the gateway's farmer-facing `HELP_TEXT` does not mention it. A farmer needs
+DRY/DAMP/WET. The operator's surfaces are `navamesh-cmd fwinfo`, the gateway's `firmware` and
+`ophelp` verbs, and `mesh_nodes.metadata->>'firmware_version'`. `test_operator_surface.py` in
+the Navamesh repo pins that separation.
 
-**Carry it in `NavameshAck` too, and treat that as load-bearing rather than optional.** The
-boot announcement is a *single unacknowledged broadcast on a lossy medium*: if the Pi is down
-when it fires, or it collides with seventeen siblings during a fleet power-cycle, nothing
-ever repeats it. A node that then stays up for weeks — the field fleet runs 2 to 11.7 days
-between reboots — leaves the Pi blind about exactly the node a rollout needs to account for.
+**The ack refresh is load-bearing, not a nice-to-have.** The boot announce is a *single
+unacknowledged broadcast on a lossy medium*: if the Pi is down when it fires, or it collides
+with seventeen siblings during a fleet power-cycle, nothing ever repeats it — and the field
+fleet runs **2 to 11.7 days between reboots**, so the Pi would stay blind about exactly the
+node a rollout needs to account for. Because every ack carries the version, *any* command
+refreshes it, which is how an operator resolves an unknown node without waiting for a reboot.
+`fwinfo` is that with nothing else attached.
 
-Putting the version in every ack means **any command refreshes it**, which gives the operator
-a way to resolve an unknown node without waiting for a reboot, at no new protocol cost. Note
-also that reboots are not only reflashes — power cycles, brownouts and watchdog resets all
-trigger one, which is harmless (the announcement is idempotent) but means "we heard a version"
-does not imply "this node was just flashed".
+Note reboots are **not only reflashes** — power cycles, brownouts and watchdog resets all
+trigger one. Harmless, since the announce is idempotent, but "we heard a version" does not
+mean "this node was just flashed".
 
-On the Pi side, keep **"never announced" distinguishable from a recorded value** rather than
-defaulting to something that reads like an answer. The Pi's knowledge is honestly "as of last
-boot or last command", and `soil_raw IS NULL` independently answers "flashed at all".
+The Pi keeps **"never announced" distinguishable from a recorded value** rather than
+defaulting to something that reads like an answer: `firmware_version` is NULL, and the
+gateway's `firmware` view lists those nodes under "Not reported yet" instead of guessing.
+Its knowledge is honestly "as of last boot or last command". `soil_raw IS NULL` independently
+answers "flashed at all", which is a different question and still the right one for a
+legacy → new rollout.
 
-An earlier version of this note argued for the ack *instead* of `SoilReading` on airtime
-grounds. That argument was overstated: at the SENSOR default of 8 hours a node transmits
-three times a day, so a 4-byte hash plus protobuf overhead is negligible against the packet's
-fixed cost. Airtime only decides this at a shortened interval. What actually decides it is
-that the value changes on reboot, so reboot is when to send it.
-
-A 4-byte git hash beats the 18-char string. Adding a field is protobuf-compatible with
-deployed nodes, but the `.proto` is duplicated **byte-identically** in the Navamesh repo and
-must be regenerated in both.
-
-What is already answerable without any of this: whether a node has been flashed *at all*.
-Legacy sends a percentage as text, this firmware sends `SoilReading` with raw ADC, and the Pi
-populates `soil_raw` only from that path — so `soil_raw` NULL means not yet flashed. That
-covers a legacy → new rollout; it cannot distinguish one new build from another, which is
-what the rollout *after* this one needs.
+Flash cost: **+224 bytes**, 91.8% either way.
 
 ## Verified on the bench, 2026-08-23
 

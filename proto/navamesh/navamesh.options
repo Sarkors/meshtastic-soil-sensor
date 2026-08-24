@@ -1,0 +1,15 @@
+# nanopb field options for navamesh.proto.
+#
+# Firmware-side only. nanopb reads this to size fields at compile time; the Pi's
+# navamesh_pb2.py is built by plain protoc, which ignores it entirely. That is why
+# this file is NOT duplicated into the Navamesh repo the way navamesh.proto is --
+# only the .proto has to stay byte-identical across the two.
+#
+# Without a max_size here nanopb emits a pb_callback_t for the string, which means
+# hand-written encode/decode callbacks for a field that is a fixed short constant.
+
+# APP_VERSION is Meshtastic's long version string: "2.7.20.200289a" today, 14 chars.
+# 20 leaves room for a longer hash or a two-digit minor without a proto change, and
+# matches the spirit of DeviceMetadata.firmware_version[18] upstream. Includes the
+# NUL terminator.
+navamesh.NavameshAck.firmware_version max_size:20
