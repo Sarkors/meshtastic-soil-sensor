@@ -239,10 +239,25 @@ enough for random selection to work would mean *minutes*. So a broadcast reply n
 **slot** derived from `(nodenum + command_id) % NAVAMESH_BCAST_ACK_SLOTS`, which fans the
 fleet out evenly instead of clustering it wherever chance lands.
 
-`command_id` is in that expression deliberately. Without it the mapping is fixed, so two
-nodes sharing a slot would collide on **every** broadcast forever — a permanent silent blind
-spot on those two nodes. Mixing it in makes a collision a one-command accident that a retry
-resolves.
+The slot is a **hash** of `(nodenum, command_id)`, not their sum, and that distinction was
+found by measuring rather than by reading. Adding them cancels:
+
+```
+(a + id) mod S  -  (b + id) mod S  ==  (a - b) mod S
+```
+
+The `command_id` drops out, so adding it rotates every node by the same amount — it moves the
+group around the window while leaving the spacing *between* nodes fixed. Two nodes congruent
+mod S would then collide on **every** broadcast forever, and no retry could separate them. It
+was visible on the bench: two nodes held a constant 0.77–1.1 s spacing across three
+consecutive broadcasts. At 18 nodes over 45 slots the chance of at least one such pair is
+**~97%**, so it was the likely outcome, not a corner case. A murmur3 finalizer moves each
+node independently per command, which makes a collision an independent 1-in-S event that a
+retry does resolve.
+
+**A slot must hold a whole packet including the in-slot jitter**, or a reply starting late in
+its slot runs into the next one and the slotting buys nothing at the boundary. 1100 ms slot,
+275 ms maximum offset, 770 ms measured airtime — 1045 ms worst case, inside the slot.
 
 Unicast is untouched: it keeps the tight 200-4000 ms window, because an operator standing in
 a field waiting on a Bluetooth window is the case that must stay fast.

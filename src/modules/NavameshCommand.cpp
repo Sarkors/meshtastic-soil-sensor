@@ -96,16 +96,32 @@ bool NavameshCommandModule::quietModeActive = false;
 // So don't choose randomly: give each node its own slot, derived from its nodenum. Nodes then
 // fan out evenly instead of clustering wherever chance puts them.
 //
-// command_id is folded into the slot deliberately. Without it the mapping is fixed, so two
-// nodes whose nodenums happen to share a slot would collide on every broadcast forever --
-// a permanent, silent blind spot on those two. Mixing in command_id reshuffles the assignment
-// for each command, so a colliding pair is a one-command accident that a retry resolves.
+// The slot is a HASH of (nodenum, command_id), not their sum. That distinction was found by
+// measuring rather than by reading, and it matters:
+//
+//     (a + id) mod S  -  (b + id) mod S  ==  (a - b) mod S
+//
+// -- the command_id cancels. Adding it rotates every node by the same amount, so it moves the
+// whole group around the window while leaving the spacing between nodes fixed. Two nodes whose
+// ids are congruent mod S would then collide on EVERY broadcast, permanently, and no retry
+// could ever separate them. On a bench, two nodes held a constant 0.77-1.1 s spacing across
+// three consecutive broadcasts, which is that invariance being visible.
+//
+// At 18 nodes over 45 slots the chance of at least one such pair is ~97%, so this was not a
+// corner case -- it was the likely outcome.
+//
+// A mixing finalizer breaks the relationship: each node's slot moves independently per
+// command, so a collision is an independent 1-in-S event and a retry genuinely resolves it.
 //
 // A slot must hold one packet plus guard: 0.77 s measured airtime against a 1 s slot. 45 slots
 // puts the last reply at ~45 s, inside both the gateway's 120 s ack timeout and navamesh-cmd's
 // 60 s -- and the CLI returns on the first ack anyway, so the window is not a wait the
 // operator sits through.
-#define NAVAMESH_BCAST_ACK_SLOT_MS 1000
+// A slot must contain a whole packet INCLUDING the in-slot jitter below, or a reply starting
+// late in its slot runs into the next one and the slotting achieves nothing at the boundary.
+// Measured airtime is under 0.77 s; 1100 ms slot minus a 275 ms maximum offset leaves 825 ms
+// of room, so a reply cannot cross into its neighbour.
+#define NAVAMESH_BCAST_ACK_SLOT_MS 1100
 #define NAVAMESH_BCAST_ACK_SLOTS 45
 
 NavameshCommandModule::NavameshCommandModule()
@@ -454,11 +470,20 @@ void NavameshCommandModule::queueAck(NodeNum dest, uint32_t commandId, navamesh_
         // Own slot, so the fleet fans out instead of answering together. nodeDB->getNodeNum()
         // rather than mp.from: it must be *this* node's identity, and every node must derive a
         // different slot from the same command.
-        uint32_t slot = (nodeDB->getNodeNum() + commandId) % NAVAMESH_BCAST_ACK_SLOTS;
-        // Half a slot of randomness inside the slot. The slot does the spreading; this only
-        // softens the case where two nodes do land together, so they are offset rather than
-        // exactly simultaneous -- LoRa's capture effect can then still recover one of them.
-        ackDueMs = millis() + slot * NAVAMESH_BCAST_ACK_SLOT_MS + random(0, NAVAMESH_BCAST_ACK_SLOT_MS / 2);
+        uint32_t h = nodeDB->getNodeNum() ^ (commandId * 2654435761u);
+        // murmur3 finalizer: cheap, and it decorrelates neighbouring inputs, which is the
+        // whole requirement here -- nodenums on one deployment are often close together.
+        h ^= h >> 16;
+        h *= 2246822519u;
+        h ^= h >> 13;
+        h *= 3266489917u;
+        h ^= h >> 16;
+        uint32_t slot = h % NAVAMESH_BCAST_ACK_SLOTS;
+        // A quarter-slot of randomness inside the slot -- bounded so a reply still cannot
+        // reach its neighbour's slot. The slot does the spreading; this only softens the case
+        // where two nodes do land in the SAME slot, so they start offset rather than exactly
+        // together and LoRa's capture effect has something to work with.
+        ackDueMs = millis() + slot * NAVAMESH_BCAST_ACK_SLOT_MS + random(0, NAVAMESH_BCAST_ACK_SLOT_MS / 4);
     } else {
         ackDueMs = millis() + random(NAVAMESH_ACK_JITTER_MIN_MS, NAVAMESH_ACK_JITTER_MAX_MS);
     }
