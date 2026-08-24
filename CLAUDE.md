@@ -181,8 +181,21 @@ unsolicited ack, which is how quiet-mode self-expiry reports itself.
 once, and 18 simultaneous broadcasts collide — which is not hypothetical, collisions are what
 made the dev bench drop acks (see below).
 
-**Carry it in `NavameshAck` too, as an opportunistic refresh.** Free, since acks are already
-sent, and it covers the case where the Pi was down at boot and missed the announcement.
+**Carry it in `NavameshAck` too, and treat that as load-bearing rather than optional.** The
+boot announcement is a *single unacknowledged broadcast on a lossy medium*: if the Pi is down
+when it fires, or it collides with seventeen siblings during a fleet power-cycle, nothing
+ever repeats it. A node that then stays up for weeks — the field fleet runs 2 to 11.7 days
+between reboots — leaves the Pi blind about exactly the node a rollout needs to account for.
+
+Putting the version in every ack means **any command refreshes it**, which gives the operator
+a way to resolve an unknown node without waiting for a reboot, at no new protocol cost. Note
+also that reboots are not only reflashes — power cycles, brownouts and watchdog resets all
+trigger one, which is harmless (the announcement is idempotent) but means "we heard a version"
+does not imply "this node was just flashed".
+
+On the Pi side, keep **"never announced" distinguishable from a recorded value** rather than
+defaulting to something that reads like an answer. The Pi's knowledge is honestly "as of last
+boot or last command", and `soil_raw IS NULL` independently answers "flashed at all".
 
 An earlier version of this note argued for the ack *instead* of `SoilReading` on airtime
 grounds. That argument was overstated: at the SENSOR default of 8 hours a node transmits
