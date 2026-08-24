@@ -137,12 +137,21 @@ need reproducing on a second node.
 
 **`SET_LOCATION` must never be broadcast.** Every node would claim the same spot; the Pi
 enforces this and the proto says so. The consequence worth knowing: it is the one command
-with **no broadcast fallback**, so it inherits the reliability of unicast. On the bench,
-unicast to a node that had just rebooted several times timed out repeatedly while
-`^all` broadcasts to the same node were applied first time (`meshtastic`'s own CLI warns
-"Nodes out of direct gateway range cannot be reached by unicast; try ^all"). Not a firmware
-fault, but a `setloc` timeout means *unknown*, not *failed* -- retry, and trust the ack when
-it arrives rather than assuming the write did not happen.
+with **no broadcast fallback**, so it inherits whatever reliability the link has.
+
+On the bench that reliability was poor, and the reason is worth recording because it looks
+like a firmware fault and is not. Commands and acks were dropped intermittently in *both*
+directions: one broadcast was applied on the node (confirmed over serial) while its ack
+never reached the gateway, and two unicasts never reached the node at all. It flapped rather
+than settled -- a `setloc` succeeded and the next command 30 s later did not.
+
+Not weak signal, the opposite: `rx_rssi` was **-10 to -16 dBm** where usable LoRa runs -40
+to -120, i.e. three nodes and the gateway sitting on one desk, some on a shortened interval,
+with command traffic on top. Near-field desense plus collisions. Do not read bench
+unicast loss as a mesh problem; nodes spread across a farm are the normal case.
+
+The operational rule that follows: a `setloc` timeout means *unknown*, not *failed*. Retry,
+and confirm with `position` or `map <id>` rather than inferring from a missing ack.
 
 ## Verified on the bench, 2026-08-23
 
