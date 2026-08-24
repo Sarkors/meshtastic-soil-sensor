@@ -62,8 +62,14 @@ class NavameshCommandModule : public ProtobufModule<navamesh_NavameshCommand>, p
 
     /// Stage an ack. Deliberately deferred and jittered -- see the implementation.
     /// latitudeI/longitudeI are echoed for SET_LOCATION and left at 0 by every other command.
+    /// wasBroadcast selects the reply spread: a slot derived from this node's id for a
+    /// broadcast command (so n nodes do not answer at once), the tight random window for a
+    /// unicast. It is passed explicitly rather than inferred from `dest`, because the
+    /// unsolicited acks -- boot announce, quiet self-expiry -- are addressed to broadcast
+    /// while being nobody's reply, and must not be spread as though they were.
     void queueAck(NodeNum dest, uint32_t commandId, navamesh_NavameshCommandType type, bool ok,
-                  uint32_t appliedValue, int32_t latitudeI = 0, int32_t longitudeI = 0);
+                  uint32_t appliedValue, int32_t latitudeI = 0, int32_t longitudeI = 0,
+                  bool wasBroadcast = false);
     void sendQueuedAckIfDue(uint32_t now);
 
     void closeBleWindow();
@@ -92,6 +98,9 @@ class NavameshCommandModule : public ProtobufModule<navamesh_NavameshCommand>, p
     uint32_t lastAppliedValue = 0;
     int32_t lastAppliedLatitudeI = 0;
     int32_t lastAppliedLongitudeI = 0;
+    /// Retained with the rest of the verdict so a re-ack of a duplicate spreads the same way
+    /// the original did -- a retried broadcast is still a broadcast.
+    bool lastWasBroadcast = false;
 
     /**
      * Single pending ack slot. Control traffic is human-paced, so a queue would be dead weight.

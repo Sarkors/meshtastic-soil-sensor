@@ -217,6 +217,40 @@ legacy → new rollout.
 
 Flash cost: **+224 bytes**, 91.8% either way.
 
+## Replying to a broadcast is not the same problem as replying to a unicast
+
+A unicast command has one answer; a broadcast has one per node, all triggered at the same
+instant. Collisions then grow with n^2, and the fix for one is the wrong tool for the other.
+
+**Two separate faults were found here on 2026-08-24, before the fleet flash.**
+
+The first is that the random ack jitter was being **quantised away**. `runOnce()` returned
+`NAVAMESH_POLL_INTERVAL_MS` (2 s) unconditionally, so a deadline anywhere inside a 2 s tick
+fired at the same instant as every other deadline in that tick — a 200-4000 ms window
+collapsed to two or three distinct outcomes. Measured, not theorised: three bench nodes
+answering one broadcast produced acks **0.768 s apart, twice**, which is one airtime rather
+than a jittered spread, and **one ack in twelve was lost at a fleet size of three**. The
+thread now ticks at `NAVAMESH_ACK_POLL_INTERVAL_MS` (100 ms) while an ack is staged, and at
+2 s the rest of the time.
+
+The second is that random choice does not scale to a fleet. At 18 nodes the combined ack
+airtime (~0.77 s each, measured) exceeds a 3.8 s window several times over, and widening it
+enough for random selection to work would mean *minutes*. So a broadcast reply now takes a
+**slot** derived from `(nodenum + command_id) % NAVAMESH_BCAST_ACK_SLOTS`, which fans the
+fleet out evenly instead of clustering it wherever chance lands.
+
+`command_id` is in that expression deliberately. Without it the mapping is fixed, so two
+nodes sharing a slot would collide on **every** broadcast forever — a permanent silent blind
+spot on those two nodes. Mixing it in makes a collision a one-command accident that a retry
+resolves.
+
+Unicast is untouched: it keeps the tight 200-4000 ms window, because an operator standing in
+a field waiting on a Bluetooth window is the case that must stay fast.
+
+**This mitigates rather than eliminates.** 18 nodes into 45 slots still collides occasionally,
+so `firmware` on the Pi — a database read, fed by the boot announce — remains the source of
+truth for fleet state. Never read fleet state off a broadcast ack.
+
 ## Verified on the bench, 2026-08-23
 
 **The legacy → new migration preserves config.** This was the open worry: `loadFromDisk()`

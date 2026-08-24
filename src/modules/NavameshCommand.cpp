@@ -28,6 +28,16 @@ bool NavameshCommandModule::quietModeActive = false;
 // (minutes to days), so a 2 s granularity costs nothing and keeps the thread cheap.
 #define NAVAMESH_POLL_INTERVAL_MS 2000
 
+// ...except while an ack is staged, when the coarse tick is actively harmful. The ack jitter
+// below is meaningless if the thread only looks every 2 s: every node whose deadline falls in
+// the same tick fires in the same tick, and the radio then serialises them back to back. That
+// is measurable -- three bench nodes produced acks 0.768 s apart, twice, which is one airtime,
+// not a jittered spread, and one ack in twelve was lost at a fleet size of three.
+//
+// Ticking fast while an ack is pending costs a few hundred extra wakeups across the couple of
+// seconds one is outstanding, and nothing at all the rest of the time.
+#define NAVAMESH_ACK_POLL_INTERVAL_MS 100
+
 // Bluetooth maintenance window bounds, in minutes.
 #define NAVAMESH_BLE_WINDOW_MIN_MINUTES 1
 #define NAVAMESH_BLE_WINDOW_MAX_MINUTES 240
@@ -76,6 +86,27 @@ bool NavameshCommandModule::quietModeActive = false;
 // lost -- it is a once-per-boot packet with no retry, so the cheapest fix is to not be early.
 #define NAVAMESH_BOOT_ANNOUNCE_MIN_MS 5000
 #define NAVAMESH_BOOT_ANNOUNCE_MAX_MS 35000
+
+// Replying to a BROADCAST command is a different problem from replying to a unicast, and the
+// random window above is the wrong tool for it. One broadcast lands on every node at once, so
+// n nodes answer into the same window and collisions grow with n^2 -- at 18 nodes a 3.8 s
+// window is oversubscribed several times over by combined airtime alone (~0.77 s each,
+// measured), and widening it enough for random choice to work would mean minutes.
+//
+// So don't choose randomly: give each node its own slot, derived from its nodenum. Nodes then
+// fan out evenly instead of clustering wherever chance puts them.
+//
+// command_id is folded into the slot deliberately. Without it the mapping is fixed, so two
+// nodes whose nodenums happen to share a slot would collide on every broadcast forever --
+// a permanent, silent blind spot on those two. Mixing in command_id reshuffles the assignment
+// for each command, so a colliding pair is a one-command accident that a retry resolves.
+//
+// A slot must hold one packet plus guard: 0.77 s measured airtime against a 1 s slot. 45 slots
+// puts the last reply at ~45 s, inside both the gateway's 120 s ack timeout and navamesh-cmd's
+// 60 s -- and the CLI returns on the first ack anyway, so the window is not a wait the
+// operator sits through.
+#define NAVAMESH_BCAST_ACK_SLOT_MS 1000
+#define NAVAMESH_BCAST_ACK_SLOTS 45
 
 NavameshCommandModule::NavameshCommandModule()
     : ProtobufModule("NavameshCommand", NAVAMESH_COMMAND_PORTNUM, &navamesh_NavameshCommand_msg),
@@ -344,7 +375,7 @@ bool NavameshCommandModule::handleReceivedProtobuf(const meshtastic_MeshPacket &
         LOG_INFO("NavameshCommand: duplicate command_id=%u, re-acking previous result",
                  (unsigned)cmd->command_id);
         queueAck(mp.from, lastAcceptedCommandId, lastAckType, lastAckOk, lastAppliedValue,
-                 lastAppliedLatitudeI, lastAppliedLongitudeI);
+                 lastAppliedLatitudeI, lastAppliedLongitudeI, lastWasBroadcast);
         return true;
     }
 
@@ -399,13 +430,16 @@ bool NavameshCommandModule::handleReceivedProtobuf(const meshtastic_MeshPacket &
     lastAppliedValue = applied;
     lastAppliedLatitudeI = appliedLatitudeI;
     lastAppliedLongitudeI = appliedLongitudeI;
+    lastWasBroadcast = isBroadcast(mp.to);
 
-    queueAck(mp.from, cmd->command_id, cmd->command_type, ok, applied, appliedLatitudeI, appliedLongitudeI);
+    queueAck(mp.from, cmd->command_id, cmd->command_type, ok, applied, appliedLatitudeI, appliedLongitudeI,
+             lastWasBroadcast);
     return true;
 }
 
 void NavameshCommandModule::queueAck(NodeNum dest, uint32_t commandId, navamesh_NavameshCommandType type,
-                                     bool ok, uint32_t appliedValue, int32_t latitudeI, int32_t longitudeI)
+                                     bool ok, uint32_t appliedValue, int32_t latitudeI, int32_t longitudeI,
+                                     bool wasBroadcast)
 {
     ackPending = true;
     ackDest = dest;
@@ -415,7 +449,19 @@ void NavameshCommandModule::queueAck(NodeNum dest, uint32_t commandId, navamesh_
     ackAppliedValue = appliedValue;
     ackAppliedLatitudeI = latitudeI;
     ackAppliedLongitudeI = longitudeI;
-    ackDueMs = millis() + random(NAVAMESH_ACK_JITTER_MIN_MS, NAVAMESH_ACK_JITTER_MAX_MS);
+
+    if (wasBroadcast) {
+        // Own slot, so the fleet fans out instead of answering together. nodeDB->getNodeNum()
+        // rather than mp.from: it must be *this* node's identity, and every node must derive a
+        // different slot from the same command.
+        uint32_t slot = (nodeDB->getNodeNum() + commandId) % NAVAMESH_BCAST_ACK_SLOTS;
+        // Half a slot of randomness inside the slot. The slot does the spreading; this only
+        // softens the case where two nodes do land together, so they are offset rather than
+        // exactly simultaneous -- LoRa's capture effect can then still recover one of them.
+        ackDueMs = millis() + slot * NAVAMESH_BCAST_ACK_SLOT_MS + random(0, NAVAMESH_BCAST_ACK_SLOT_MS / 2);
+    } else {
+        ackDueMs = millis() + random(NAVAMESH_ACK_JITTER_MIN_MS, NAVAMESH_ACK_JITTER_MAX_MS);
+    }
 }
 
 void NavameshCommandModule::sendQueuedAckIfDue(uint32_t now)
@@ -524,5 +570,7 @@ int32_t NavameshCommandModule::runOnce()
     checkQuietModeExpiry(now);
     sendQueuedAckIfDue(now);
 
-    return NAVAMESH_POLL_INTERVAL_MS;
+    // The whole point of jittering an ack is lost if the deadline is only inspected every 2 s,
+    // which is what produced measurable back-to-back replies from separate nodes.
+    return ackPending ? NAVAMESH_ACK_POLL_INTERVAL_MS : NAVAMESH_POLL_INTERVAL_MS;
 }
