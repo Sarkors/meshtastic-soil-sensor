@@ -262,6 +262,16 @@ its slot runs into the next one and the slotting buys nothing at the boundary. 1
 Unicast is untouched: it keeps the tight 200-4000 ms window, because an operator standing in
 a field waiting on a Bluetooth window is the case that must stay fast.
 
+**Consequence: leave ~1 minute between fleet-wide commands.** The module holds a single
+pending ack slot, so a second command overwrites an ack the first has not sent yet. That
+tradeoff predates this change and was harmless when the window was 4 s; at ~50 s it is easy
+to hit. Measured: two `fwinfo ^all` sent 20 s apart returned **0/3** then **3/3** — the first
+command's acks were replaced on every node before they were due.
+
+Nothing is misapplied: both commands are received and acted on, and only the earlier
+*confirmation* is lost. But it surfaces as a timeout on a command that worked, which is the
+failure this project keeps having to warn about. Unicast is unaffected (4 s window).
+
 **This mitigates rather than eliminates.** 18 nodes into 45 slots still collides occasionally,
 so `firmware` on the Pi — a database read, fed by the boot announce — remains the source of
 truth for fleet state. Never read fleet state off a broadcast ack.
