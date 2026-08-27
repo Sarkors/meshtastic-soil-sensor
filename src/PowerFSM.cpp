@@ -392,13 +392,26 @@ void PowerFSM_setup()
 #endif // HAS_WIFI || !defined(MESHTASTIC_EXCLUDE_WIFI)
 
 #else // (not) ARCH_ESP32
-    // Shut off bluetooth after the configured window (saves power on nRF52 sensor nodes).
-    // Note: do NOT add a DARK->DARK self-loop here. The FSM library resets all timed transitions
-    // from the current state on every transition, so a self-loop would continuously reset this
-    // timer and BT would never shut off.
-    powerFSM.add_timed_transition(&stateDARK, &stateNB,
-                                  Default::getConfiguredOrDefaultMs(config.power.wait_bluetooth_secs, default_wait_bluetooth_secs),
-                                  NULL, "Bluetooth timeout");
+    // Bluetooth on nRF52 is driven by commanded maintenance windows, NOT by a timer.
+    //
+    // There used to be a DARK->NB timed transition on config.power.wait_bluetooth_secs here. It was
+    // removed deliberately: nbEnter() calls setBluetoothEnable(false), and escaping stateNB requires
+    // EVENT_PRESS / EVENT_INPUT / EVENT_RECEIVED_MSG / EVENT_SERIAL_CONNECTED. The RAK4631 variant
+    // defines no BUTTON_PIN and the field nodes are headless and sealed in solar cases, so once that
+    // timer fired the node was unreachable over BLE until someone physically power-cycled it. That
+    // cost a truck roll per node. Upstream Meshtastic guards the BLE-off in nbEnter() with
+    // #ifdef ARCH_ESP32 precisely so nRF52 never gets into this situation.
+    //
+    // NavameshCommandModule now owns the window: BLE_WINDOW opens it, and the module's own timer
+    // closes it. Keeping the decision here (rather than having the module call setBluetoothEnable()
+    // directly) preserves nbEnter()/darkEnter() as the single source of truth for the BLE radio.
+    //
+    // These are EVENT transitions, not timed ones, so the DARK->DARK refresh below is safe: the
+    // hazard the old comment warned about applies to add_timed_transition, whose clock resets on
+    // every transition of the FSM. An event transition only fires when trigger() is called.
+    powerFSM.add_transition(&stateNB, &stateDARK, EVENT_BLE_WINDOW_REQUESTED, NULL, "BLE window requested");
+    powerFSM.add_transition(&stateDARK, &stateDARK, EVENT_BLE_WINDOW_REQUESTED, NULL, "BLE window refreshed");
+    powerFSM.add_transition(&stateDARK, &stateNB, EVENT_BLE_WINDOW_EXPIRED, NULL, "BLE window expired");
 #endif
 
     powerFSM.run_machine(); // run one iteration of the state machine, so we run our on enter tasks for the initial DARK state

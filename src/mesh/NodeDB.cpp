@@ -934,8 +934,26 @@ void NodeDB::installRoleDefaults(meshtastic_Config_DeviceConfig_Role role)
         moduleConfig.telemetry.environment_measurement_enabled = true;
         moduleConfig.telemetry.environment_update_interval = 28800; // 8 hours (3x/day) for field sensor nodes
         config.position.gps_mode = meshtastic_Config_PositionConfig_GpsMode_NOT_PRESENT; // No hardware GPS on sensor nodes
-        config.device.rebroadcast_mode = meshtastic_Config_DeviceConfig_RebroadcastMode_NONE; // Sensor nodes don't forward mesh traffic
-        config.power.wait_bluetooth_secs = 1800; // 30 minutes: useful config window after boot, then BT shuts off
+        // Sensor nodes don't forward mesh traffic.
+        //
+        // Deliberate power decision, not an oversight. LoRa TX is the dominant draw on these
+        // solar nodes (tx_power 30), and with hop_limit 3 a relaying node retransmits every
+        // packet it hears from every neighbour -- plausibly ~10x its own TX count. The whole
+        // deployment is a star: all nodes reach the Pi gateway directly, so relaying buys no
+        // reporting reliability and no extra command reach today. It would only be insurance
+        // against a link that has not degraded.
+        //
+        // If a specific node later develops a marginal path (missing readings), set THAT node
+        // to LOCAL_ONLY -- a per-node config change, no reflash, no cost to the rest of the
+        // fleet. Prefer LOCAL_ONLY over ALL so it ignores foreign meshes it cannot decrypt.
+        //
+        // Do NOT use CORE_PORTNUMS_ONLY: it relays only standard portnums, so soil readings
+        // (256) and the command/ack pair (258/259) would all be silently dropped.
+        config.device.rebroadcast_mode = meshtastic_Config_DeviceConfig_RebroadcastMode_NONE;
+        // Retained but now inert on nRF52: the DARK->NB timed transition this drove was
+        // removed from PowerFSM, because once BT shut off a headless RAK4631 had no way back.
+        // Bluetooth is now opened on demand by a NavameshCommand BLE_WINDOW instead.
+        config.power.wait_bluetooth_secs = 1800;
         config.power.is_power_saving = false; // nRF52 FreeRTOS tickless idle handles power mgmt; is_power_saving=true
                                               // enables post-read deep sleep which causes the node to appear powered off
         config.position.position_broadcast_secs = ONE_DAY; // Static nodes — broadcast position once/day (immediate send still fires on set/boot)
@@ -1407,6 +1425,33 @@ void NodeDB::loadFromDisk()
             moduleConfig.paxcounter.paxcounter_update_interval = 0;
 
         saveToDisk(SEGMENT_MODULECONFIG);
+    }
+
+    // A SENSOR node with environment telemetry switched off is the one broken state
+    // that looks completely healthy from the gateway: it acks commands, broadcasts
+    // NodeInfo, holds a good link, reports the right role -- and never sends a soil
+    // reading, because EnvironmentTelemetry returns early at init when environment
+    // measurement is disabled and so never registers AnalogSoilSensor.
+    //
+    // It is reachable without anyone doing anything wrong. config and moduleConfig are
+    // loaded and defaulted independently above, and neither default path calls
+    // installRoleDefaults() -- only factoryReset() does. So a corrupt or unreadable
+    // moduleConfig leaves role=SENSOR from a healthy config with environment
+    // measurement back at its proto default of false, and a discarded config defaults
+    // role to SENSOR while a CLIENT-era moduleConfig survives with it still false.
+    // environment_measurement_enabled is set in exactly one place in this file
+    // (installRoleDefaults, SENSOR branch), which is why nothing else restores it.
+    //
+    // For a SENSOR node this combination is never a deliberate configuration: the role
+    // exists to report the probe. So repair it rather than reporting it -- re-applying
+    // the role defaults costs a stale telemetry interval at worst, against a node that
+    // otherwise stays silent in the field until someone opens its case. Loudly, because
+    // a silent self-repair would hide however it got here.
+    if (config.device.role == meshtastic_Config_DeviceConfig_Role_SENSOR &&
+        !moduleConfig.telemetry.environment_measurement_enabled) {
+        LOG_WARN("SENSOR role with environment telemetry disabled -- reapplying role defaults");
+        installRoleDefaults(meshtastic_Config_DeviceConfig_Role_SENSOR);
+        saveToDisk(SEGMENT_CONFIG | SEGMENT_MODULECONFIG);
     }
 #if ARCH_PORTDUINO
     // set any config overrides

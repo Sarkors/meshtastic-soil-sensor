@@ -1,0 +1,234 @@
+syntax = "proto3";
+
+package navamesh;
+
+/*
+ * Private Navamesh wire format.
+ *
+ * Three messages on three portnums, all on the "navamesh" channel:
+ *   SoilReading    PortNum 256 (PRIVATE_APP)  node -> Pi, broadcast
+ *   NavameshCommand PortNum 258              Pi -> node, unicast or broadcast
+ *   NavameshAck    PortNum 259               node -> Pi, unicast
+ *
+ * Separate portnums (rather than multiplexing everything onto 256) mean the
+ * receiving module's portnum filter does all the discrimination: there is no
+ * decode-order rule, no ambiguity, and SoilReading stays byte-for-byte identical
+ * to what the 18 deployed nodes already send. Only 256 and 257
+ * (ATAK_FORWARDER) are assigned upstream; 258-510 are free and _PortNum_MAX is
+ * 511, so 258/259 cannot collide with a stock portnum.
+ *
+ * This is NOT part of upstream Meshtastic. The protobufs/ submodule is never
+ * modified, so there is no risk of colliding with a field number that upstream
+ * assigns in a future release.
+ *
+ * The field node performs NO calibration. It ships the raw averaged ADC count
+ * and the Raspberry Pi owns the raw -> moisture-% mapping, so calibration can
+ * change without reflashing deployed nodes.
+ *
+ * Wire-format note for decoders: proto3 singular scalars equal to zero are
+ * omitted from the encoded bytes. A decoder MUST default absent fields to 0.
+ */
+message SoilReading {
+  /*
+   * Mean of 5 consecutive analogRead() samples, untouched: no constrain(),
+   * no map(), no scaling of any kind.
+   *
+   * RAK4631: 12-bit (0..4095) sampled against an AR_INTERNAL_3_0 reference,
+   * so volts ~= raw_adc * 3.0 / 4096. Saturates at 4095 for any input >= 3.0 V,
+   * which is why dry air reads 4095.
+   */
+  uint32 raw_adc = 1;
+
+  /*
+   * powerStatus->getBatteryChargePercent().
+   * On RAK4631 (BATTERY_PIN defined) 0 means "no battery / unknown".
+   * On boards without BATTERY_PIN, values > 100 mean externally powered.
+   */
+  uint32 battery_percent = 2;
+
+  /*
+   * powerStatus->getBatteryVoltageMv(), clamped to >= 0 by the sender
+   * (the underlying getter is signed and defaults to -1 when unknown).
+   */
+  uint32 battery_mv = 3;
+
+  /*
+   * Wrap-safe seconds since boot.
+   */
+  uint32 uptime_seconds = 4;
+}
+
+/*
+ * What a NavameshCommand asks a node to do.
+ *
+ * Numeric arguments are carried in NavameshCommand rather than encoded per-type,
+ * so adding a command later does not disturb existing field numbers. Bounds are
+ * enforced in firmware constants, NOT here -- limits can then be retuned by a
+ * firmware bump without a proto regen on both sides.
+ */
+enum NavameshCommandType {
+  NAVAMESH_COMMAND_UNKNOWN = 0;
+
+  /*
+   * Enable Bluetooth for duration_minutes, then disable it automatically.
+   * This is how the field crew gets a connectable node without opening the
+   * solar case: broadcast the window, walk up, connect, and it closes itself.
+   */
+  BLE_WINDOW = 1;
+
+  /*
+   * Set moduleConfig.telemetry.environment_update_interval to interval_seconds.
+   * Takes effect on the next telemetry cycle with NO reboot, and persists.
+   */
+  SET_TELEMETRY_INTERVAL = 2;
+
+  /*
+   * Stop transmitting telemetry and position. The receiver stays on, so the node
+   * still hears QUIET_MODE_EXIT. duration_minutes is a safety ceiling after
+   * which the node resumes on its own, so a lost exit command cannot silence a
+   * node indefinitely. Never persisted -- any reboot resumes normal operation.
+   */
+  QUIET_MODE_ENTER = 3;
+
+  /*
+   * Resume transmitting immediately.
+   */
+  QUIET_MODE_EXIT = 4;
+
+  /*
+   * Store latitude_i/longitude_i as this node's fixed position, exactly as the
+   * Meshtastic app's "Fixed Position" toggle does over Bluetooth.
+   *
+   * These nodes ship with gps_mode = NOT_PRESENT and have no GPS receiver, so a
+   * position can only ever come from outside. Until now that meant standing next
+   * to a sealed solar case with the stock app; this carries the same coordinates
+   * over LoRa instead. Applied with NO reboot and persisted.
+   *
+   * Never send this to NODENUM_BROADCAST: every node would claim the same spot.
+   */
+  SET_LOCATION = 5;
+
+  /*
+   * Report the node's firmware version and change nothing.
+   *
+   * Every other command in this enum mutates the node, which made "what build is
+   * this node running?" unanswerable without altering it -- and the version is
+   * exactly what you want *before* deciding whether to alter it. This is the one
+   * safe probe: it applies nothing, and the ack it elicits carries
+   * firmware_version like any other.
+   *
+   * A node also sends this UNSOLICITED once at boot (command_id = 0), so a node
+   * that has just been flashed reports its new build without being asked. That
+   * is what makes a partially-updated fleet a query rather than a guess.
+   *
+   * Safe to broadcast: the reply is the only effect. Expect one ack per node in
+   * radio range, which is why the firmware jitters them.
+   */
+  GET_FIRMWARE_INFO = 6;
+}
+
+/*
+ * Pi -> node, PortNum 258.
+ *
+ * There is deliberately no target-node field. Meshtastic's own routing already
+ * does the addressing: MeshModule::callModules() computes
+ * toUs = isBroadcast(mp.to) || isToUs(&mp) and only dispatches matching packets,
+ * so mp.to = NODENUM_BROADCAST reaches every node and mp.to = <nodenum> reaches
+ * exactly one.
+ */
+message NavameshCommand {
+  NavameshCommandType command_type = 1;
+
+  /*
+   * Sender-chosen nonce, echoed in NavameshAck.command_id so the Pi can
+   * correlate a reply to the command that caused it.
+   *
+   * Also the replay guard: a node rejects any command_id that is not strictly
+   * greater than the last one it accepted. This channel has no PKI (trust is the
+   * channel PSK), so without this a captured packet could simply be replayed.
+   */
+  uint32 command_id = 2;
+
+  /*
+   * BLE_WINDOW and QUIET_MODE_ENTER. 0 means "use the firmware default".
+   */
+  uint32 duration_minutes = 3;
+
+  /*
+   * SET_TELEMETRY_INTERVAL only.
+   */
+  uint32 interval_seconds = 4;
+
+  /*
+   * SET_LOCATION only: degrees * 1e7, the same integer convention (and the same
+   * sfixed32 wire type) as meshtastic.Position.latitude_i/longitude_i, so the
+   * values drop straight into a meshtastic_Position with no rescaling.
+   *
+   * sfixed32 rather than sint32 because a coordinate is almost never small: the
+   * zigzag varint that makes sint32 cheap for values near zero costs 5 bytes for
+   * a real longitude, where sfixed32 is always exactly 4.
+   *
+   * 0/0 is rejected rather than applied. It is a valid point in the Gulf of
+   * Guinea, but in practice it only ever means "the sender had no GPS fix".
+   */
+  sfixed32 latitude_i = 5;
+  sfixed32 longitude_i = 6;
+}
+
+/*
+ * node -> Pi, PortNum 259, unicast back to the commanding node.
+ *
+ * Also sent UNSOLICITED with command_id = 0 and command_type = QUIET_MODE_EXIT
+ * when quiet mode self-expires, so the Pi learns a node recovered on its own
+ * even though nobody sent it an exit command.
+ */
+message NavameshAck {
+  uint32 command_id = 1;
+  NavameshCommandType command_type = 2;
+
+  /*
+   * False when the command was malformed or the value was out of range.
+   */
+  bool ok = 3;
+
+  /*
+   * The value actually applied AFTER clamping, so the Pi can report "you asked
+   * for 5 s, the node applied 30 s" rather than silently disagreeing with it.
+   */
+  uint32 applied_value = 4;
+
+  /*
+   * SET_LOCATION only: the coordinates actually stored, echoed back.
+   *
+   * applied_value is unsigned and single, so it cannot carry a signed pair. The
+   * alternative -- inferring success from the node's next position broadcast --
+   * would make confirmation depend on a second packet surviving the mesh, and
+   * would say nothing at all while quiet mode is suppressing transmissions.
+   *
+   * Zero on every other command type, which is also what a pre-SET_LOCATION node
+   * yields when its acks are decoded by a newer Pi.
+   */
+  sfixed32 applied_latitude_i = 5;
+  sfixed32 applied_longitude_i = 6;
+
+  /*
+   * The node's firmware version, e.g. "2.7.20.200289a" -- Meshtastic's APP_VERSION,
+   * the same string the app and a serial console show, with the git short hash on
+   * the end.
+   *
+   * Carried on EVERY ack, not just GET_FIRMWARE_INFO ones, because the question it
+   * answers is usually asked about a command that already went wrong: an ok=False
+   * from a node running a build that predates the handler is indistinguishable from
+   * a value the handler rejected. Two diagnoses on 2026-08-21 were lost to exactly
+   * that. Answering it in the same packet costs no extra transmission.
+   *
+   * Deliberately the string rather than a 4-byte hash. Acks are only sent in reply
+   * to a command, so the airtime is bounded by operator traffic rather than by the
+   * reporting interval -- and the string is directly comparable to what the
+   * Meshtastic app shows and to the .zip filename that was flashed, which a hash
+   * would need a lookup table to match.
+   *
+   * Empty from a node running a build older than this field.
+   */
+  string firmware_version = 7;
+}

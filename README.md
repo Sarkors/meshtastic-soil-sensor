@@ -9,7 +9,10 @@ All firmware patches are already applied in this repo. Clone, build, flash, and 
 ## What This Does
 
 * Reads an analog soil moisture sensor (HD-38) directly on the radio node
-* Transmits soil moisture percentage as Meshtastic environment telemetry
+* Transmits the **raw averaged ADC count** (mean of 5 samples) as a `navamesh.SoilReading`
+  protobuf on PortNum 256 (PRIVATE_APP) — **the node performs no calibration**
+* The Raspberry Pi owns the raw-ADC → moisture-% mapping, so calibration can be retuned
+  without reflashing deployed nodes
 * Automatically relays readings as a text message to a configurable channel (default: `navamesh`)
 * Includes battery percentage, voltage, and uptime in relay messages
 * Broadcasts node position to the mesh for GIS mapping
@@ -97,11 +100,7 @@ Install [VS Code](https://code.visualstudio.com/) and the PlatformIO extension, 
 pip install platformio
 ```
 
-### 3. Calibrate
-
-Before building, update the calibration values in `src/modules/Telemetry/Sensor/AnalogSoilSensor.h` to match your sensor and soil conditions. See [CONFIGURATION.md](CONFIGURATION.md) for instructions.
-
-### 4. Build
+### 3. Build
 
 **RAK4631:**
 
@@ -115,7 +114,11 @@ pio run -e rak4631
 pio run -e heltec-v3
 ```
 
-### 5. Flash
+> **Calibration is no longer a build-time step.** The node ships the raw ADC; set
+> `SOIL_ADC_DRY` / `SOIL_ADC_WET` in the Raspberry Pi's `.env` instead.
+> See [CONFIGURATION.md](CONFIGURATION.md).
+
+### 4. Flash
 
 **RAK4631:**
 
@@ -149,7 +152,7 @@ The node will reboot with all firmware defaults applied. Do this **before** addi
 
 **How to verify defaults applied correctly:** Connect via BLE in the Meshtastic app — if the node's role shows as SENSOR, the defaults are active. If it shows CLIENT or any other role, factory reset is needed.
 
-**Note on environment telemetry in the app:** The Environment Metrics section will be greyed out in the app until the node sends its first telemetry reading after boot. This is normal — wait for the first telemetry cycle (connect via BLE to trigger one immediately) and the section will become active.
+**Note on environment telemetry in the app:** The Environment Metrics section stays greyed out **permanently**. This is expected, not a fault — the node deliberately writes no EnvironmentMetrics fields now that the raw ADC travels in its own `navamesh.SoilReading` protobuf. The node still emits an (empty) environment telemetry packet because its local loopback is what triggers the relay.
 
 ### Deployment Order Per Node
 
@@ -181,7 +184,13 @@ Since these nodes don't have a physical GPS module, the position is set from you
 4. The app grabs your phone's current GPS and pushes it to the node
 5. Save
 
-The node will now broadcast that position to the mesh every 15 minutes. To update the position later (e.g. if the node is moved), just repeat step 4.
+The node will now broadcast that position to the mesh every 15 minutes.
+
+**To update the position later, you no longer need Bluetooth.** Once a node is running
+this firmware, the Pi gateway can set its position over LoRa with the `setloc` command —
+in the Navamesh Farm app, *Set node location* takes the phone's own GPS fix and pushes it
+to the node you pick. See [Remote Commands](#remote-commands). The Bluetooth steps above
+are still the way to seed a position on a bench before the node is deployed.
 
 ### Optional: Override Telemetry Interval for Testing
 
@@ -208,20 +217,81 @@ pio device monitor --port COMX --baud 115200
 You should see:
 
 ```
-[EnvironmentTelemetry] AnalogSoilSensor: raw ADC=XXXX, moisture=XX%
+[EnvironmentTelemetry] AnalogSoilSensor: raw ADC = 2871
 [EnvironmentTelemetry] Send packet to mesh
-TelemetryRelay: sending 'Soil: XX% | Bat: 72% (3.85V) | Up: 3h 22m' to channel 1
+TelemetryRelay: raw_adc=2871 bat=72% 3850mV up=12120s -> ch 1 (navamesh) port 256
+TelemetryRelay: sending 'ADC: 2871 | Bat: 72% (3.85V) | Up: 3h 22m' to channel 1
 ```
+
+Note there is **no moisture percentage in the serial log** — that is expected. The node
+no longer computes one.
 
 On any phone connected to the mesh with the navamesh channel configured, you should see relay messages arriving at your set interval.
 
 ---
 
+## Wire Format
+
+Each reading cycle broadcasts on the `navamesh` channel:
+
+**1. `navamesh.SoilReading` on PortNum 256 (PRIVATE_APP) — authoritative.**
+Defined in `proto/navamesh/navamesh.proto`; nanopb classes are generated into
+`src/mesh/generated/navamesh/` by `./bin/regen-navamesh-proto.sh`.
+
+| Field | # | Type |
+|-------|---|------|
+| `raw_adc` | 1 | `uint32` |
+| `battery_percent` | 2 | `uint32` |
+| `battery_mv` | 3 | `uint32` |
+| `uptime_seconds` | 4 | `uint32` |
+
+This is a **private** message. Meshtastic's own `protobufs/` submodule is never modified,
+so there is no risk of colliding with a field number upstream assigns later.
+
+Two decoder notes: proto3 omits zero-valued scalars from the wire, so absent fields must
+default to 0; and the payload is encrypted with the `navamesh` channel PSK, so the
+receiving gateway must be provisioned on that channel.
+
+**2. A debug text message** (see below). Useful on a phone, but the protobuf is the
+measurement of record.
+
+## Remote Commands
+
+The Pi gateway can reconfigure a sealed, solar-cased node over LoRa, so routine changes no
+longer need a truck roll or an open case. `NavameshCommandModule` (`src/modules/`) receives
+`navamesh.NavameshCommand` on **PortNum 258** and answers with `navamesh.NavameshAck` on
+**PortNum 259**.
+
+| Command | Argument | Effect |
+|---------|----------|--------|
+| `BLE_WINDOW` | `duration_minutes` | Turn Bluetooth on for N minutes, then off again by itself |
+| `SET_TELEMETRY_INTERVAL` | `interval_seconds` | New reporting cadence, live, no reboot |
+| `QUIET_MODE_ENTER` / `_EXIT` | `duration_minutes` | Stop transmitting; the receiver stays on |
+| `SET_LOCATION` | `latitude_i`, `longitude_i` | Store a fixed position (degrees × 1e7) |
+
+None of these reboot the node. `SET_LOCATION` takes the same path as the Meshtastic app's
+Fixed Position toggle (`AdminModule`'s `set_fixed_position`), so the result is identical to
+setting it over Bluetooth — it just arrives over the mesh instead. The node then broadcasts
+its new position immediately rather than waiting out the 15-minute interval.
+
+Two guards worth knowing:
+
+* **`SET_LOCATION` is unicast-only.** Broadcast to `^all` it would give every node the same
+  coordinates, so the Pi refuses it in two places and the firmware never applies a position
+  it cannot attribute.
+* **0/0 is rejected, and coordinates are never clamped.** A latitude clamped to the valid
+  range is simply a different place; refusing is the only safe failure.
+
+`command_id` is a monotonic replay guard: a node rejects any id not greater than the last
+one it accepted, except an exact repeat, which it re-acknowledges so the Pi's retries still
+get an answer. Trust comes from the `navamesh` channel PSK (or a PKI-encrypted unicast) —
+there is no signature on the payload.
+
 ## Relay Message Format
 
 ```
-Soil: 45% | Bat: 72% (3.85V) | Up: 3h 22m     (on battery)
-Soil: 45% | Bat: USB | Up: 3h 22m              (USB powered)
+ADC: 2871 | Bat: 72% (3.85V) | Up: 3h 22m     (on battery)
+ADC: 2871 | Bat: USB | Up: 3h 22m              (USB powered)
 ```
 
 ---
@@ -232,10 +302,10 @@ Soil: 45% | Bat: USB | Up: 3h 22m              (USB powered)
 Soil Sensor (HD-38)
       │ analog voltage
       ▼
-RAK4631 / Heltec v3
-  ├─ ADC reading → moisture %
-  ├─ Environment telemetry packet → LoRa mesh
-  ├─ Text relay 'Soil: XX% | Bat | Up' → LoRa mesh (navamesh channel)
+RAK4631 / Heltec v3          ← performs NO calibration
+  ├─ ADC read ×5 → average → RAW count (never constrained, never mapped)
+  ├─ navamesh.SoilReading protobuf → LoRa mesh (navamesh ch, PortNum 256)
+  ├─ Text relay 'ADC: XXXX | Bat | Up' → LoRa mesh (debug)
   └─ Position broadcast → LoRa mesh (every 15 min)
       │
       ▼
@@ -243,8 +313,14 @@ Router Node (WisBlock)
   └─ Rebroadcasts packets across mesh
       │
       ▼
+Raspberry Pi gateway         ← sole owner of calibration
+  ├─ decodes SoilReading, stores raw ADC verbatim
+  ├─ applies SOIL_ADC_DRY / SOIL_ADC_WET curve → soil_percent
+  └─ writes BOTH soil_raw and soil_percent to Influx / Postgres / cloud
+      │
+      ▼
 Any phone on navamesh channel
-  └─ Receives relay messages + sees node on map
+  └─ Receives debug relay messages + sees node on map
 ```
 
 ---
@@ -266,17 +342,31 @@ git checkout backhaul   # for backhaul nodes
 
 ---
 
-## Calibration Reference (HD-38, RAK4631)
+## Raw ADC Reference (HD-38, RAK4631)
+
+Input for **Pi-side** calibration — these are no longer compiled into the firmware.
 
 | Condition | Raw ADC |
 |-----------|---------|
 | Dry air | 4095 |
-| Dry soil | 3040 |
+| Dry soil | 3120 |
 | Moist soil | ~2879 |
 | Wet/muddy | 1567 |
 | Open water | 849 |
 
-See [CONFIGURATION.md](CONFIGURATION.md) for how to update these values.
+**ADC transfer function.** The RAK4631 samples at 12-bit resolution
+(`analogReadResolution(BATTERY_SENSE_RESOLUTION_BITS)` = 12) against an `AR_INTERNAL_3_0`
+reference (`variants/nrf52840/rak4631/variant.h`), so:
+
+```
+volts ≈ raw_adc × 3.0 / 4096
+```
+
+The reading **saturates at 4095 for any input ≥ 3.0 V**, which is why dry air reads 4095.
+Anyone fitting a new curve needs this.
+
+Set `SOIL_ADC_DRY` / `SOIL_ADC_WET` in the Raspberry Pi's `.env` and restart the bridge —
+no reflash required.
 
 # Video Setup Walkthroughs 
 ## Node Flashing and Meshtastic Configuration 

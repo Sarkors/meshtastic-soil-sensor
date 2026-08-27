@@ -1,4 +1,5 @@
 #include "configuration.h"
+#include "modules/NavameshCommand.h"
 #include "modules/TelemetryRelay.h"
 
 #if !MESHTASTIC_EXCLUDE_INPUTBROKER
@@ -112,7 +113,8 @@
 void setupModules()
 {
 	telemetryRelayModule = new TelemetryRelayModule();
-	
+	navameshCommandModule = new NavameshCommandModule();
+
 #if (HAS_BUTTON || ARCH_PORTDUINO) && !MESHTASTIC_EXCLUDE_INPUTBROKER
     if (config.display.displaymode != meshtastic_Config_DisplayConfig_DisplayMode_COLOR) {
         inputBroker = new InputBroker();
