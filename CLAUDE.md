@@ -73,6 +73,90 @@ Worth checking after any addition.
 
 ## Things that will bite
 
+**A rename can be silently thrown away, and rebooting makes it worse.** Diagnosed
+2026-08-26 on `!79d4bb41` after its rename failed to reach the Pi for hours.
+
+Setting the owner *does* try to announce immediately: `set_owner` → `reloadOwner(true)` →
+`sendOurNodeInfo()`. But that call takes the default `_shorterTimeout = false`, so it goes
+through the full throttle in `NodeInfoModule::allocReply()`:
+
+```cpp
+uint32_t timeoutMs = Default::getConfiguredOrDefaultMsScaled(0, 10 * 60, nodeStatus->getNumOnline());
+if (!shorterTimeout && lastNodeInfo && Throttle::isWithinTimespanMs(lastNodeInfo, timeoutMs)) {
+    LOG_DEBUG("Skip send NodeInfo since we sent it <%us ago");
+    return NULL;
+}
+```
+
+If the node broadcast a NodeInfo in the previous **10 minutes**, the rename's announce is
+discarded — `return NULL`, one DEBUG line, nothing on the air, no error anywhere. The
+60-second `shorterTimeout` variant exists and nothing on the rename path asks for it. The
+congestion scaling only engages above **40** online nodes, so it is a flat 10 minutes on
+both the bench and the 18-node farm.
+
+Two things make this nastier than it sounds:
+
+- **`TransmitHistory` persists the timestamp to `/prefs/transmit_history.dat`
+  deliberately, "so that throttle checks survive reboots/crashes".** A reboot does not
+  clear it, and neither does a DFU flash — `/prefs` is the same LittleFS directory that
+  keeps the role. Only a factory erase clears it, which also wipes role, channel index 1,
+  PSK and the name.
+- **Every boot fires a NodeInfo attempt at ~30 s** (`setStartDelay()` = 30 s + 15 s per
+  periodic module), so a node you have just flashed or rebooted is *guaranteed* to be
+  inside the window for the next 10 minutes.
+
+Once the rename is dropped the next opportunity is the full `node_info_broadcast_secs`
+(10800 s / 3 h on these nodes) — so "leave it on the bench for an hour" does not help, and
+four reboots in fifteen minutes produced no announce at all (confirmed by capturing the
+Pi's raw packet firehose for 90 s and then 190 s: soil, telemetry, acks and text all
+arrived from that node, and zero `NODEINFO_APP`).
+
+**Provisioning order that works: rename LAST, with the node powered and untouched for
+10+ minutes, and do not reboot afterwards to make it take.** Verified: with the node up
+64 minutes, a rename put `NODEINFO_APP` with `longName: "Node B"` on the air within
+seconds and the Pi ingested it.
+
+The fix, if this is worth closing: `reloadOwner()` should pass `_shorterTimeout = true`,
+taking 10 min down to 60 s. Better still, bypass entirely — the throttle exists to suppress
+*duplicate* announcements and a rename changes the payload, so 60 s is still wrong in
+principle (a rename 45 s after boot would still vanish). `TransmitHistory` has no
+clear-entry API, so a proper bypass means threading a force flag through
+`sendOurNodeInfo` → `allocReply`.
+
+**Position is blurred by the channel, not by the node.** `PositionModule` masks outgoing
+coordinates to `channels.getByIndex(...).settings.module_settings.position_precision` and
+then re-centres them on the cell:
+
+```cpp
+p.latitude_i = localPosition.latitude_i & (UINT32_MAX << (32 - precision));
+p.latitude_i += (1 << (31 - precision));   // middle of the cell, so the value can go UP
+```
+
+On `!79d4bb41` **channel 0** carried `position_precision = 13` — a ~5.8 x 5.2 km grid —
+so every `setloc` was stored correctly and transmitted as the same cell centre ~3 km away.
+Re-sending could never converge, because every coordinate on the farm falls in one cell.
+Masking `26.3731000, -80.0974000` at 13 reproduces the received `26.3979008, -80.0849920`
+digit for digit. The `navamesh` channel at index 1 was already 32, and
+`installDefaultChannelFile()` sets channel 0 to 32 with the comment "Full position
+precision for field sensor nodes" — so a 13 came from outside, most likely a channel-URL
+import or the app's precision slider. **Check `position_precision` on channel 0 of every
+node**, not just the private channel. Fix:
+`meshtastic --ch-index 0 --ch-set module_settings.position_precision 32`.
+
+Note also that the re-centring `+=` means a masked coordinate can be *larger* than the
+original — do not reason about this as "masking only clears bits".
+
+**`setloc` itself is sound and does persist.** Tested end to end 2026-08-26: sent from the
+Pi, stored with `LOC_MANUAL` and `fixed_position: true`, node rebooted over serial, and
+position, flag and name all survived. When a `setloc` appears not to have applied, suspect
+the channel precision above, or the Meshtastic app clearing it — an observed
+`fixed_position: false` with the coordinates gone entirely is the signature of
+`remove_fixed_position`, which the app can send while you are editing the node.
+
+**`uptimeSeconds` from `meshtastic --info` is a stale telemetry snapshot, not live
+uptime.** It read 126 s twice in a row before jumping to 3846 s. Do not diagnose a
+spontaneous reboot from it.
+
 **Flashing does not set the role. Nothing about a DFU flash provisions a node.**
 The role lives in the saved config in LittleFS, which a `.uf2`/`.zip` flash does not
 erase, so a node keeps whatever role it had — silently. `DEVICESTATE_CUR_VER` and
